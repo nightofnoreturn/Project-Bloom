@@ -1,0 +1,16 @@
+[package]
+name = "bloom-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI frontend for Project Bloom (Stage 1 core & downloader verification)."
+
+[[bin]]
+name = "bloom"
+path = "src/main.rs"
+
+[dependencies]
+bloom-core = { path = "../bloom-core" }
+clap.workspace = true
+tokio.workspace = true

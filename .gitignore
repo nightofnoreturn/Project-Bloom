@@ -1,0 +1,21 @@
+# Local Bifrost reference directory (keep local, do not push)
+/Bifrost/
+
+# Rust / Cargo build outputs
+/target/
+**/*.rs.bk
+
+# IDE & OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Downloaded / temporary firmware files
+*.enc2
+*.enc4
+*.bloom-state.json
+*.bloom-state.tmp
+*.zip
