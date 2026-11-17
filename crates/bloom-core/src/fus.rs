@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CACHE_CONTROL, COOKIE, USER_AGENT};
+use reqwest::header::{
+    HeaderMap, HeaderValue, AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, COOKIE, USER_AGENT,
+};
 use reqwest::Client;
 
 use crate::crypto::{decrypt_nonce, md5_hex};
@@ -77,13 +80,13 @@ pub struct FusClient {
     mode: FusMode,
     nonce: String,
     auth: String,
-    jsession_id: String,
-    session: String,
+    cookies: BTreeMap<String, String>,
 }
 
 impl FusClient {
     pub fn new(mode: FusMode) -> Result<Self> {
         let http = Client::builder()
+            .http1_only()
             .connect_timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(10))
@@ -94,8 +97,7 @@ impl FusClient {
             mode,
             nonce: String::new(),
             auth: String::new(),
-            jsession_id: String::new(),
-            session: String::new(),
+            cookies: BTreeMap::new(),
         })
     }
 
@@ -105,8 +107,7 @@ impl FusClient {
             mode,
             nonce: String::new(),
             auth: String::new(),
-            jsession_id: String::new(),
-            session: String::new(),
+            cookies: BTreeMap::new(),
         }
     }
 
@@ -134,11 +135,12 @@ impl FusClient {
 
     pub async fn generate_nonce(&mut self) -> Result<()> {
         let endpoint = self.mode.generate_nonce_endpoint();
-        let _ = self.send_fus_request(endpoint, "", None).await?;
+        let (status, body) = self.send_fus_request(endpoint, "", None).await?;
         if self.nonce.is_empty() || self.auth.is_empty() {
-            return Err(BloomError::Crypto(
-                "Samsung FUS did not return a valid NONCE header".into(),
-            ));
+            let preview: String = body.chars().take(300).collect();
+            return Err(BloomError::Crypto(format!(
+                "Samsung FUS did not return a valid NONCE header (HTTP {status}): {preview}"
+            )));
         }
         Ok(())
     }
@@ -161,19 +163,16 @@ impl FusClient {
     }
 
     fn cookie_header(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.jsession_id.is_empty() {
-            parts.push(format!("JSESSIONID={}", self.jsession_id));
-        }
-        if !self.session.is_empty() {
-            parts.push(format!("SESSION={}", self.session));
-        }
-        parts.join(";")
+        self.cookies
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 
     fn consume_response_headers(&mut self, headers: &HeaderMap) {
         if let Some(raw_nonce) = headers.get("nonce").and_then(|v| v.to_str().ok()) {
-            let truncated: String = raw_nonce.chars().take(16).collect();
+            let truncated: String = raw_nonce.trim().chars().take(16).collect();
             if let Ok(new_auth) = decrypt_nonce(&truncated) {
                 self.nonce = truncated;
                 self.auth = new_auth;
@@ -183,10 +182,12 @@ impl FusClient {
         for val in headers.get_all("set-cookie") {
             if let Ok(cookie_str) = val.to_str() {
                 let pair = cookie_str.split(';').next().unwrap_or("").trim();
-                if let Some(v) = pair.strip_prefix("JSESSIONID=") {
-                    self.jsession_id = v.to_owned();
-                } else if let Some(v) = pair.strip_prefix("SESSION=") {
-                    self.session = v.to_owned();
+                if let Some((name, value)) = pair.split_once('=') {
+                    let name = name.trim();
+                    let value = value.trim();
+                    if !name.is_empty() {
+                        self.cookies.insert(name.to_owned(), value.to_owned());
+                    }
                 }
             }
         }
@@ -218,6 +219,7 @@ impl FusClient {
             .post(url)
             .header(AUTHORIZATION, auth_v)
             .header(USER_AGENT, self.mode.user_agent())
+            .header(CONTENT_LENGTH, body_data.len().to_string())
             .body(body_data.to_owned());
 
         let cookie = self.cookie_header();
