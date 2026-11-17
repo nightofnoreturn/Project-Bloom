@@ -309,26 +309,43 @@ pub fn extract_v4_key(doc: &Document<'_>) -> Option<([u8; 16], String)> {
     Some((md5_bytes(dec_key.as_bytes()), dec_key))
 }
 
-fn check_against_model_string(file_segment: &str, model_string: &str) -> bool {
-    let mut current = model_string;
+fn model_match_score(file_segment: &str, model: &str) -> usize {
+    // Real build version tokens (e.g. A075FXXU7DZJ5) always have digits and are >= 6 chars,
+    // unlike short component prefixes such as "AP", "BL", "CP", "CSC", or "HOME".
+    if file_segment.len() < 6 || !file_segment.bytes().any(|b| b.is_ascii_digit()) {
+        return 0;
+    }
+    let mut best = 0usize;
+    let mut current = model;
     while !current.is_empty() && !current.ends_with('-') {
         let model_suffix = current.split('-').nth(1).unwrap_or(current);
         let joined_model = current.replace('-', "");
-        if file_segment.starts_with(model_suffix) || file_segment.starts_with(&joined_model) {
-            return true;
+        if model_suffix.len() >= 2 && file_segment.starts_with(model_suffix) {
+            best = best.max(model_suffix.len());
+        }
+        if joined_model.len() >= 3 && file_segment.starts_with(&joined_model) {
+            best = best.max(joined_model.len());
         }
         let Some(last_idx) = current.char_indices().last().map(|(i, _)| i) else {
             break;
         };
         current = &current[..last_idx];
     }
-    false
+    best
 }
 
 fn get_segment_index(file: Option<&str>, model: &str) -> Option<usize> {
     let file = file.filter(|s| !s.trim().is_empty())?;
     file.split('_')
-        .position(|seg| check_against_model_string(seg, model))
+        .enumerate()
+        .filter_map(|(idx, seg)| {
+            let score = model_match_score(seg, model);
+            (score > 0).then_some((idx, score))
+        })
+        .max_by(|(idx_a, score_a), (idx_b, score_b)| {
+            score_a.cmp(score_b).then_with(|| idx_b.cmp(idx_a))
+        })
+        .map(|(idx, _)| idx)
 }
 
 /// Parse `BINARY_INFORM` response XML into [`BinaryFileInfo`].
@@ -570,5 +587,38 @@ mod tests {
         assert!(xml.contains("<BINARY_NAME><Data>SM-S928B_1_20240220120000_abcd1234_fac.zip.enc4</Data></BINARY_NAME>"));
         assert!(xml.contains("<DEVICE_LOCAL_CODE><Data>XID</Data></DEVICE_LOCAL_CODE>"));
         assert!(xml.contains("<LOGIC_CHECK><Data>"));
+    }
+
+    #[test]
+    fn a_series_model_does_not_false_match_ap_prefix() {
+        let xml = r#"
+        <FUSMsg>
+          <FUSBody>
+            <Results>
+              <Status>200</Status>
+              <LATEST_FW_VERSION><Data>A075FXXU7DZJ5/A075FOLM7DZJ5/A075FXXU7DZJ5/A075FXXU7DZJ5</Data></LATEST_FW_VERSION>
+            </Results>
+            <Put>
+              <BINARY_BYTE_SIZE><Data>9000000000</Data></BINARY_BYTE_SIZE>
+              <BINARY_NAME><Data>SM-A075F_1_20261101120000_abcd1234_fac.zip.enc4</Data></BINARY_NAME>
+              <MODEL_PATH><Data>SM-A075F/XID/</Data></MODEL_PATH>
+              <DEVICE_PDA_CODE1_FILE><Data>AP_A075FXXU7DZJ5_QB12345_REV00_user_low_ship.tar.md5</Data></DEVICE_PDA_CODE1_FILE>
+              <DEVICE_CSC_FILE><Data>CSC_OLM_A075FOLM7DZJ5_QB12345_REV00_user_low_ship.tar.md5</Data></DEVICE_CSC_FILE>
+              <DEVICE_PHONE_FONT_FILE><Data>CP_A075FXXU7DZJ5_CP12345_REV00_user_low_ship.tar.md5</Data></DEVICE_PHONE_FONT_FILE>
+              <LOGIC_VALUE_FACTORY><Data>0123456789ABCDEF</Data></LOGIC_VALUE_FACTORY>
+            </Put>
+          </FUSBody>
+        </FUSMsg>"#;
+
+        let info = parse_binary_inform(
+            xml,
+            "A075FXXU7DZJ5/A075FOLM7DZJ5/A075FXXU7DZJ5/A075FXXU7DZJ5",
+            "SM-A075F",
+            "XID",
+            false,
+        )
+        .expect("SM-A075F should not confuse 'AP' with model suffix 'A'");
+
+        assert_eq!(info.size, 9_000_000_000);
     }
 }
