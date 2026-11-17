@@ -1114,7 +1114,9 @@ impl eframe::App for BloomApp {
         eframe::set_value(storage, eframe::APP_KEY, &self.config);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         if !self.applied_theme {
             ctx.set_visuals(if self.config.dark_mode {
                 egui::Visuals::dark()
@@ -1126,7 +1128,7 @@ impl eframe::App for BloomApp {
 
         self.refresh_resumable_if_needed();
 
-        egui::TopBottomPanel::top("top_nav").show(ctx, |ui| {
+        egui::Panel::top("top_nav").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("Bloom");
@@ -1154,10 +1156,10 @@ impl eframe::App for BloomApp {
             ui.add_space(4.0);
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
-                Tab::Download => self.render_download_tab(ui, ctx),
-                Tab::Decrypt => self.render_decrypt_tab(ui, ctx),
+                Tab::Download => self.render_download_tab(ui, &ctx),
+                Tab::Decrypt => self.render_decrypt_tab(ui, &ctx),
                 Tab::CscLookup => self.render_csc_tab(ui),
             });
         });
