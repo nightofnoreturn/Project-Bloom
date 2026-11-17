@@ -134,7 +134,7 @@ impl FusClient {
 
     pub async fn generate_nonce(&mut self) -> Result<()> {
         let endpoint = self.mode.generate_nonce_endpoint();
-        let _ = self.post_raw(endpoint, "", None).await?;
+        let _ = self.send_fus_request(endpoint, "", None).await?;
         if self.nonce.is_empty() || self.auth.is_empty() {
             return Err(BloomError::Crypto(
                 "Samsung FUS did not return a valid NONCE header".into(),
@@ -198,11 +198,18 @@ impl FusClient {
         body_data: &str,
         signature: Option<&str>,
     ) -> Result<(u16, String)> {
-        let is_nonce_req = endpoint == self.mode.generate_nonce_endpoint();
-        if self.nonce.is_empty() && !is_nonce_req {
+        if self.nonce.is_empty() {
             self.generate_nonce().await?;
         }
+        self.send_fus_request(endpoint, body_data, signature).await
+    }
 
+    async fn send_fus_request(
+        &mut self,
+        endpoint: &str,
+        body_data: &str,
+        signature: Option<&str>,
+    ) -> Result<(u16, String)> {
         let auth_v = self.build_auth_header(signature);
         let url = format!("{FUS_API_BASE}/{endpoint}");
 
