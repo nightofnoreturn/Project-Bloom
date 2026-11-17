@@ -1,0 +1,18 @@
+[package]
+name = "bloom-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native Windows & Linux GUI for Project Bloom."
+
+[[bin]]
+name = "bloom-app"
+path = "src/main.rs"
+
+[dependencies]
+bloom-core = { path = "../bloom-core" }
+eframe.workspace = true
+rfd.workspace = true
+serde.workspace = true
+tokio.workspace = true

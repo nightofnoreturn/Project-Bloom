@@ -273,6 +273,30 @@ pub fn derive_output_filenames(remote_file_name: &str, fw: &str, region: &str) -
     (enc_name, dec_name)
 }
 
+/// Scan `dir` for any saved `*.bloom-state.json` checkpoints so the UI can show resumable jobs.
+pub fn list_resumable_states(dir: &Path) -> Vec<DownloadStateFile> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_state = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.ends_with(".bloom-state.json"));
+        if !is_state {
+            continue;
+        }
+        if let Ok(raw) = std::fs::read(&path) {
+            if let Ok(state) = serde_json::from_slice::<DownloadStateFile>(&raw) {
+                found.push(state);
+            }
+        }
+    }
+    found
+}
+
 /// Partition `[0, total_size)` into up to `connections` contiguous non-empty byte segments.
 pub fn build_segments(total_size: u64, connections: usize) -> Vec<SegmentState> {
     if total_size == 0 {

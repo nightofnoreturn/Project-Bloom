@@ -1,20 +1,23 @@
 # Project Bloom
 
-Native, lightweight, crash-resilient Samsung firmware downloader & decrypter for **Windows** and **Linux**, written in pure Rust.
+Native, lightweight, crash-resilient Samsung firmware downloader & decrypter for **Windows** and **Linux**, written in pure Rust (`egui` + `tokio` + `aes`).
 
-> **Status:** Stage 1 (`bloom-core` + `bloom-cli` + GitHub Actions CI for Windows & Linux) is ready. Stage 2 will add the native `egui` desktop GUI (`bloom-app`).
+## Features
 
-## Why Bloom?
+- **Native Desktop GUI (`bloom-app`) + CLI (`bloom`):** Single portable native executable per platform — no JVM, no Electron, no HTML/WebView.
+- **Disconnect & Crash-Proof Resume:** Tracks per-segment byte offsets atomically in `.bloom-state.json`, auto-detects resumable partial downloads on launch, never deletes partial files on errors, and **automatically refreshes expired Samsung FUS `Authorization` tokens (`401`) mid-download**.
+- **Single-Pass Verification:** Computes CRC32 (hardware-accelerated via `crc32fast`) and MD5 simultaneously in one sequential read.
+- **Parallel AES-NI Decryption:** Decrypts `.enc4` and `.enc2` files across all CPU cores with bounded ~4 MiB memory usage.
+- **Built-in CSC Browser & Speed Limiter:** Searchable database of 500+ Samsung CSC regions (`cscs.csv`) and optional bandwidth cap.
 
-- **Zero wasted progress on huge 17 GB firmwares:** Tracks per-segment byte offsets atomically in `.bloom-state.json`, never deletes partial files on network errors/timeouts, handles `Ctrl+C` pause cleanly, and **automatically refreshes expired Samsung FUS `Authorization` tokens (`401`) mid-download**.
-- **Single-pass verification:** Computes CRC32 (hardware-accelerated via `crc32fast`) and MD5 simultaneously in one disk read.
-- **Parallel AES-NI decryption:** Decrypts `.enc4` and `.enc2` files across all CPU cores with bounded ~4 MiB memory usage.
-- **Zero external runtime:** Compiles to a single portable native executable with embedded `auth_param.dat`, `cscs.csv`, and `tacs.csv`.
+## Download
 
-## Quick Usage (Stage 1 CLI)
+Download the latest Windows (`bloom-windows-x86_64.exe`) and Linux (`bloom-linux-x86_64`) builds from the **Actions** artifacts or **Releases** tab.
+
+## CLI Usage (`bloom-cli`)
 
 ```bash
-# Search Indonesian or European CSC codes
+# Search CSC region codes
 bloom csc XID
 
 # Check latest firmware & decryption key
@@ -22,9 +25,6 @@ bloom check --model SM-S928B --csc XID
 
 # Download with 8 connections, verify, and decrypt (press Ctrl+C to pause anytime; re-run to resume)
 bloom download --model SM-S928B --csc XID --out ./downloads
-
-# Optional: limit download speed to 8 MB/s and delete .enc4 after decrypt
-bloom download --model SM-S928B --csc XID --limit-mbps 8 --delete-enc
 
 # Decrypt an existing .enc4 / .enc2 file manually
 bloom decrypt --input ./SM-S928B_....zip.enc4 --key "<key>"
