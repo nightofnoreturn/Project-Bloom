@@ -9,11 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bloom_core::{ChangelogLang, CscDb, DownloadStateFile, ImeiDb};
-use egui::{vec2, Frame, Margin, RichText};
+use egui::{vec2, Frame, Id, Margin, RichText};
 use egui_oneui::prelude::*;
 
 use state::{
-    AppConfig, BloomPage, DecryptForm, SelectedChangelog, SharedUiState, STORAGE_KEY,
+    open_folder_in_os, AppConfig, BloomPage, DecryptForm, SelectedChangelog, SharedUiState,
+    SnackAction, STORAGE_KEY,
 };
 use tasks::{
     refresh_resumable, spawn_check_latest, spawn_download, spawn_fetch_history,
@@ -26,8 +27,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Project Bloom")
             .with_decorations(false)
-            .with_inner_size([1080.0, 760.0])
-            .with_min_inner_size([480.0, 560.0]),
+            .with_inner_size([1120.0, 790.0])
+            .with_min_inner_size([420.0, 540.0]),
         ..Default::default()
     };
 
@@ -47,15 +48,22 @@ pub struct BloomApp {
     pub decrypt_form: DecryptForm,
     pub csc_query: String,
     pub csc_quick_filter: Option<&'static str>,
+    pub csc_active_letter: Option<char>,
     pub history_filter: String,
+    pub history_tab_idx: usize,
+    pub edit_output_path_inline: bool,
+    pub edit_decrypt_paths_inline: bool,
     pub selected_changelog: Option<SelectedChangelog>,
     pub changelog_sheet_open: bool,
+    pub licenses_sheet_open: bool,
     pub page_id: usize,
     pub drawer_open: bool,
     pub color_dialog_open: bool,
     pub color_dialog_draft: egui::Color32,
     pub reset_dialog_open: bool,
     pub toast: OneUiToastState,
+    pub snackbar: OneUiSnackBarState,
+    pub active_snack_action: Option<SnackAction>,
 }
 
 impl BloomApp {
@@ -101,15 +109,22 @@ impl BloomApp {
             decrypt_form,
             csc_query: String::new(),
             csc_quick_filter: None,
+            csc_active_letter: None,
             history_filter: String::new(),
+            history_tab_idx: 0,
+            edit_output_path_inline: false,
+            edit_decrypt_paths_inline: false,
             selected_changelog: None,
             changelog_sheet_open: false,
+            licenses_sheet_open: false,
             page_id: BloomPage::Download.id(),
             drawer_open: true,
             color_dialog_open: false,
             color_dialog_draft: color_draft,
             reset_dialog_open: false,
             toast: OneUiToastState::default(),
+            snackbar: OneUiSnackBarState::default(),
+            active_snack_action: None,
         };
 
         app.sync_theme(&cc.egui_ctx);
@@ -249,6 +264,17 @@ impl BloomApp {
             .show_message(ctx, format!("Loaded {fw} into Download"), 2.4);
     }
 
+    fn show_snackbar_with_action(
+        &mut self,
+        ctx: &egui::Context,
+        msg: impl Into<String>,
+        action_label: Option<&str>,
+        action: SnackAction,
+    ) {
+        self.active_snack_action = Some(action);
+        self.snackbar.show_message(ctx, msg, action_label);
+    }
+
     fn render_changelog_bottom_sheet(&mut self, ctx: &egui::Context) {
         let Some(selected) = self.selected_changelog.clone() else {
             self.changelog_sheet_open = false;
@@ -369,6 +395,23 @@ impl BloomApp {
             );
         }
     }
+
+    fn render_licenses_bottom_sheet(&mut self, ctx: &egui::Context, theme: &OneUiTheme) {
+        OneUiBottomSheet::new("bloom_licenses_sheet", "Engine & Open Source Credits").show(
+            ctx,
+            &mut self.licenses_sheet_open,
+            |ui| {
+                CardSection::new()
+                    .fill(theme.palette.surface_container)
+                    .show(ui, |ui| {
+                        ui.add(CardItem::new("bloom-core").summary("Samsung FUS Modern/Legacy protocol, SmartHistory & resumable HTTP Range engine"));
+                        ui.add(CardItem::new("OneUI-Crate (egui-oneui)").summary("Samsung One UI 9 (SESL9) tokens, floating drawers, 3-phase AppBar & widgets").top_divider(true));
+                        ui.add(CardItem::new("emilk/egui & eframe 0.37.0").summary("MIT / Apache-2.0 — Immediate-mode Rust GUI framework").top_divider(true));
+                        ui.add(CardItem::new("resvg 0.50.0 & Roboto Flex").summary("MPL-2.0 / SIL OFL 1.1 — HiDPI One UI SVG icons & variable font").top_divider(true));
+                    });
+            },
+        );
+    }
 }
 
 impl Drop for BloomApp {
@@ -383,10 +426,16 @@ impl eframe::App for BloomApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if let Ok(mut g) = self.shared.lock() {
+        let pending_snack = if let Ok(mut g) = self.shared.lock() {
             if let Some(msg) = g.pending_toast.take() {
                 self.toast.show_message(ui.ctx(), msg, 2.8);
             }
+            g.pending_snack.take()
+        } else {
+            None
+        };
+        if let Some((msg, label, action)) = pending_snack {
+            self.show_snackbar_with_action(ui.ctx(), msg, label, action);
         }
 
         if self.config.follow_system {
@@ -402,14 +451,16 @@ impl eframe::App for BloomApp {
         let theme = theme_from_ui(ui);
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (is_busy, is_downloading, has_resumable, csc_hint) = match self.shared.lock() {
+        let (is_busy, is_downloading, is_paused, has_resumable, csc_hint) = match self.shared.lock()
+        {
             Ok(g) => (
                 g.is_busy(),
                 g.downloading,
+                g.paused,
                 !g.resumable.is_empty(),
                 self.config.csc.trim().to_ascii_uppercase(),
             ),
-            Err(_) => (false, false, false, String::new()),
+            Err(_) => (false, false, false, false, String::new()),
         };
 
         if is_busy {
@@ -471,23 +522,32 @@ impl eframe::App for BloomApp {
                 "Settings",
                 BloomPage::Settings.icon(),
             ),
+            DrawerEntry::item(BloomPage::About.id(), "About Bloom", BloomPage::About.icon()),
         ];
 
-        let (_nav_changed, footer_clicked) =
+        let (_nav_changed, settings_clicked) =
             OneUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
                 ui,
                 &mut self.drawer_open,
-                Some((OneUiIcon::Info, "About Bloom")),
+                Some((OneUiIcon::Settings, "Open Settings")),
             );
-        if footer_clicked {
-            self.page_id = BloomPage::About.id();
+        if settings_clicked {
+            self.page_id = BloomPage::Settings.id();
         }
 
         let current_page = BloomPage::from_id(self.page_id);
+        let has_floating_bar = matches!(current_page, BloomPage::Download | BloomPage::Decrypt);
+        self.snackbar
+            .set_bottom_offset(if has_floating_bar { 88.0 } else { 24.0 });
+
         let panel_frame = Frame::NONE.fill(theme.palette.round_and_bg);
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ui, |ui| {
+                let mut open_about = false;
+                let mut toggle_dark = false;
+                let is_dark = self.config.dark_mode;
+
                 let scaffold_resp = OneUiScaffold::new("bloom_scaffold", current_page.title())
                     .subtitle(current_page.subtitle())
                     .nav_button(ScaffoldNavButton::DrawerMenu)
@@ -495,28 +555,31 @@ impl eframe::App for BloomApp {
                     .show(
                         ui,
                         |toolbar_ui| {
-                            let mode_icon = if self.config.dark_mode {
-                                OneUiIcon::Sun
-                            } else {
-                                OneUiIcon::Moon
-                            };
                             if toolbar_ui
                                 .add(
-                                    OneUiIconButton::new(mode_icon)
-                                        .size(34.0)
-                                        .icon_size(18.0)
-                                        .tint(theme.palette.text_primary),
+                                    OneUiIconButton::new(OneUiIcon::Info)
+                                        .size(40.0)
+                                        .icon_size(20.0)
+                                        .tooltip("About Project Bloom"),
                                 )
-                                .on_hover_text(if self.config.dark_mode {
-                                    "Switch to Light mode"
-                                } else {
-                                    "Switch to Dark mode"
-                                })
                                 .clicked()
                             {
-                                self.config.dark_mode = !self.config.dark_mode;
-                                self.config.follow_system = false;
-                                self.sync_theme(toolbar_ui.ctx());
+                                open_about = true;
+                            }
+                            if toolbar_ui
+                                .add(
+                                    OneUiIconButton::new(if is_dark {
+                                        OneUiIcon::Sun
+                                    } else {
+                                        OneUiIcon::Moon
+                                    })
+                                    .size(40.0)
+                                    .icon_size(20.0)
+                                    .tooltip("Toggle Light / Dark mode"),
+                                )
+                                .clicked()
+                            {
+                                toggle_dark = true;
                             }
                         },
                         |ui| {
@@ -532,8 +595,87 @@ impl eframe::App for BloomApp {
                         },
                     );
 
+                if open_about {
+                    self.page_id = BloomPage::About.id();
+                }
+                if toggle_dark {
+                    self.config.follow_system = false;
+                    self.config.dark_mode = !self.config.dark_mode;
+                    self.sync_theme(ui.ctx());
+                }
                 if scaffold_resp.nav_clicked {
                     self.drawer_open = !self.drawer_open;
+                }
+
+                // Floating One UI 9 DividerButtonLayout capsule bar anchored cleanly at pane bottom
+                if current_page == BloomPage::Download {
+                    let mut bar_action: Option<usize> = None;
+                    show_bottom_floating_bar(
+                        ui,
+                        16.0,
+                        Id::unique("bloom_download_div_bar"),
+                        |ui| {
+                            if is_downloading {
+                                let items = [
+                                    DividerButtonItem::new("Pause"),
+                                    DividerButtonItem::new("Cancel").icon(OneUiIcon::Close),
+                                ];
+                                bar_action =
+                                    OneUiDividerButtonLayout::new("dl_active_bar", &items).show(ui);
+                            } else {
+                                let dl_label = if is_paused { "Resume" } else { "Download" };
+                                let items = [
+                                    DividerButtonItem::new("Check Latest")
+                                        .icon(OneUiIcon::Search)
+                                        .enabled(!is_busy),
+                                    DividerButtonItem::new(dl_label)
+                                        .icon(OneUiIcon::Download)
+                                        .enabled(!is_busy),
+                                ];
+                                bar_action =
+                                    OneUiDividerButtonLayout::new("dl_idle_bar", &items).show(ui);
+                            }
+                        },
+                    );
+                    if let Some(idx) = bar_action {
+                        if is_downloading {
+                            if idx == 0 {
+                                self.pause_download();
+                            } else {
+                                self.cancel_download();
+                            }
+                        } else if idx == 0 {
+                            self.trigger_check(ui.ctx());
+                        } else {
+                            self.trigger_download(ui.ctx(), None);
+                        }
+                    }
+                } else if current_page == BloomPage::Decrypt {
+                    let mut dec_action: Option<usize> = None;
+                    show_bottom_floating_bar(
+                        ui,
+                        16.0,
+                        Id::unique("bloom_decrypt_div_bar"),
+                        |ui| {
+                            let items = [
+                                DividerButtonItem::new("Sync Info")
+                                    .icon(OneUiIcon::Refresh)
+                                    .enabled(!is_busy),
+                                DividerButtonItem::new("Decrypt")
+                                    .icon(OneUiIcon::Shield)
+                                    .enabled(!is_busy),
+                            ];
+                            dec_action =
+                                OneUiDividerButtonLayout::new("dec_bar", &items).show(ui);
+                        },
+                    );
+                    if let Some(idx) = dec_action {
+                        if idx == 0 {
+                            self.sync_decrypt_from_download(ui.ctx());
+                        } else {
+                            self.trigger_decrypt(ui.ctx());
+                        }
+                    }
                 }
             });
 
@@ -556,7 +698,7 @@ impl eframe::App for BloomApp {
         }
         self.color_dialog_draft = draft;
 
-        // Reset confirmation dialog
+        // Reset confirmation dialog with Undo SnackBar support
         if let Some(idx) = OneUiDialog::new("bloom_reset_dialog", "Reset preferences?")
             .body("Restores default device target, output path, transfer limits, and One UI 9 theme settings.")
             .action(DialogAction::cancel("Cancel"))
@@ -564,19 +706,51 @@ impl eframe::App for BloomApp {
             .show(ui.ctx(), &mut self.reset_dialog_open, |_| {})
         {
             if idx == 1 {
+                let prev = self.config.clone();
                 self.config = AppConfig::default();
                 self.sync_theme(ui.ctx());
                 self.apply_typography(ui.ctx());
                 self.refresh_resumable();
-                self.toast
-                    .show_message(ui.ctx(), "Preferences reset to defaults", 2.4);
+                self.show_snackbar_with_action(
+                    ui.ctx(),
+                    "Preferences reset to defaults",
+                    Some("Undo"),
+                    SnackAction::RestoreConfig(Box::new(prev)),
+                );
             }
         }
 
-        // Official changelog viewer bottom sheet
+        // Official changelog & licenses bottom sheets
         self.render_changelog_bottom_sheet(ui.ctx());
+        self.render_licenses_bottom_sheet(ui.ctx(), &theme);
 
-        // Frosted pill toast overlay
+        // Suggestive SnackBar & Pill Toast overlays
+        if let Some(action) = self
+            .snackbar
+            .render(ui.ctx(), ui.ctx().content_rect())
+            .then(|| self.active_snack_action.take())
+            .flatten()
+        {
+            match action {
+                SnackAction::OpenFolder(path) => {
+                    if let Err(err) = open_folder_in_os(&path) {
+                        self.toast.show_message(
+                            ui.ctx(),
+                            format!("Could not open folder: {err}"),
+                            2.4,
+                        );
+                    }
+                }
+                SnackAction::RestoreConfig(prev) => {
+                    self.config = *prev;
+                    self.sync_theme(ui.ctx());
+                    self.apply_typography(ui.ctx());
+                    self.refresh_resumable();
+                    self.toast.show_message(ui.ctx(), "Preferences restored", 2.0);
+                }
+            }
+        }
+
         self.toast.ui(ui);
     }
 }

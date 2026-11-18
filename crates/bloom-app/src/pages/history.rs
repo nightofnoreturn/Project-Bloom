@@ -21,7 +21,13 @@ impl BloomApp {
         let p = &theme.palette;
 
         if let Some(err) = error_message.as_deref() {
-            status_banner(ui, OneUiIcon::Info, p.functional_red, "History Lookup Failed", Some(err));
+            status_banner(
+                ui,
+                OneUiIcon::Info,
+                p.functional_red,
+                "History Lookup Failed",
+                Some(err),
+            );
             ui.add_space(10.0);
         }
 
@@ -73,6 +79,14 @@ impl BloomApp {
             });
 
         ui.add_space(10.0);
+        SubTabBar::new(
+            "history_subtabs",
+            &["Firmware Builds", "Official Changelogs"],
+            &mut self.history_tab_idx,
+        )
+        .show(ui);
+        ui.add_space(10.0);
+
         let has_q = !self.history_filter.is_empty();
         let (_, clear_q) = OneUiSearchBar::new(&mut self.history_filter)
             .hint("Filter build, Android OS, date, or changelog notes...")
@@ -90,183 +104,207 @@ impl BloomApp {
                 OneUiIcon::Calendar,
                 p.primary_high,
                 "No History Loaded Yet",
-                Some("Tap 'Fetch History' to inspect available firmware builds & official changelogs."),
+                Some(
+                    "Tap 'Fetch History' to inspect available firmware builds & official changelogs.",
+                ),
             );
             return;
         };
 
         let query = self.history_filter.trim().to_ascii_lowercase();
-        let filtered: Vec<(usize, &bloom_core::HistoryItem)> = res
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| {
-                if query.is_empty() {
-                    return true;
-                }
-                item.firmware.to_ascii_lowercase().contains(&query)
-                    || item
-                        .android_version
-                        .as_deref()
-                        .is_some_and(|v| v.to_ascii_lowercase().contains(&query))
-                    || item
-                        .date
-                        .as_deref()
-                        .is_some_and(|d| d.to_ascii_lowercase().contains(&query))
-                    || item
-                        .changelog
-                        .as_ref()
-                        .and_then(|c| c.notes.as_deref())
-                        .is_some_and(|n| n.to_ascii_lowercase().contains(&query))
-            })
-            .collect();
 
-        OneUiPreferenceCaption::new(format!(
-            "{} ({}) • Source: {} • {} of {} builds • {} changelogs",
-            res.model,
-            res.region,
-            res.source,
-            filtered.len(),
-            res.items.len(),
-            res.changelogs.len()
-        ))
-        .show(ui);
+        if self.history_tab_idx == 0 {
+            let filtered: Vec<(usize, &bloom_core::HistoryItem)> = res
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| {
+                    if query.is_empty() {
+                        return true;
+                    }
+                    item.firmware.to_ascii_lowercase().contains(&query)
+                        || item
+                            .android_version
+                            .as_deref()
+                            .is_some_and(|v| v.to_ascii_lowercase().contains(&query))
+                        || item
+                            .date
+                            .as_deref()
+                            .is_some_and(|d| d.to_ascii_lowercase().contains(&query))
+                        || item
+                            .changelog
+                            .as_ref()
+                            .and_then(|c| c.notes.as_deref())
+                            .is_some_and(|n| n.to_ascii_lowercase().contains(&query))
+                })
+                .collect();
 
-        for (orig_idx, item) in filtered {
-            CardSection::new()
-                .inner_margin(Margin::symmetric(20, 14))
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 8.0;
+            OneUiPreferenceCaption::new(format!(
+                "{} ({}) • Source: {} • {} of {} builds",
+                res.model,
+                res.region,
+                res.source,
+                filtered.len(),
+                res.items.len(),
+            ))
+            .show(ui);
 
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                        if orig_idx == 0 {
-                            pill_tag(ui, "LATEST", p.primary, p.on_primary);
-                        }
-                        ui.label(
-                            RichText::new(&item.build)
-                                .font(font_id(ui, 15.5, OneUiFontWeight::SemiBold))
-                                .color(p.text_primary),
-                        );
-                        if let Some(ref os) = item.android_version {
-                            pill_tag(
-                                ui,
-                                &format!("Android {os}"),
-                                p.selected_bg,
-                                p.primary_high,
+            for (orig_idx, item) in filtered {
+                CardSection::new()
+                    .inner_margin(Margin::symmetric(20, 14))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 8.0;
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                            if orig_idx == 0 {
+                                pill_tag(ui, "LATEST", p.primary, p.on_primary);
+                            }
+                            ui.label(
+                                RichText::new(&item.build)
+                                    .font(font_id(ui, 15.5, OneUiFontWeight::SemiBold))
+                                    .color(p.text_primary),
                             );
+                            if let Some(ref os) = item.android_version {
+                                pill_tag(
+                                    ui,
+                                    &format!("Android {os}"),
+                                    p.selected_bg,
+                                    p.primary_high,
+                                );
+                            }
+                        });
+
+                        let mut meta_parts = Vec::new();
+                        if let Some(ref date) = item.date {
+                            meta_parts.push(format!("Release: {date}"));
                         }
-                    });
-
-                    let mut meta_parts = Vec::new();
-                    if let Some(ref date) = item.date {
-                        meta_parts.push(format!("Release: {date}"));
-                    }
-                    if let Some(ref patch) = item.changelog.as_ref().and_then(|c| c.sec_patch.as_ref())
-                    {
-                        meta_parts.push(format!("Security Patch: {patch}"));
-                    }
-                    if !meta_parts.is_empty() {
-                        ui.label(
-                            RichText::new(meta_parts.join("  •  "))
-                                .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
-                                .color(p.text_secondary),
-                        );
-                    }
-
-                    ui.label(
-                        RichText::new(&item.firmware)
-                            .font(font_id(ui, 12.5, OneUiFontWeight::Regular))
-                            .color(p.text_muted),
-                    );
-
-                    if let Some(notes) = item.changelog.as_ref().and_then(|c| c.notes.as_deref()) {
-                        let preview: String = notes.lines().take(2).collect::<Vec<_>>().join(" ");
-                        if !preview.trim().is_empty() {
-                            Frame::NONE
-                                .fill(p.surface_container)
-                                .corner_radius(egui::CornerRadius::same(14))
-                                .inner_margin(Margin::symmetric(12, 8))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width().max(100.0));
-                                    ui.label(
-                                        RichText::new(preview)
-                                            .font(font_id(ui, 12.5, OneUiFontWeight::Regular))
-                                            .color(p.text_secondary),
-                                    );
-                                });
-                        }
-                    }
-
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                        if ui
-                            .add(
-                                OneUiButton::primary("Load in Downloader")
-                                    .icon(OneUiIcon::Download)
-                                    .enabled(!is_busy)
-                                    .min_size(vec2(150.0, 34.0)),
-                            )
-                            .clicked()
+                        if let Some(ref patch) =
+                            item.changelog.as_ref().and_then(|c| c.sec_patch.as_ref())
                         {
-                            self.load_build_into_downloader(
-                                res.model.clone(),
-                                res.region.clone(),
-                                item.firmware.clone(),
-                                ui.ctx(),
+                            meta_parts.push(format!("Security Patch: {patch}"));
+                        }
+                        if !meta_parts.is_empty() {
+                            ui.label(
+                                RichText::new(meta_parts.join("  •  "))
+                                    .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
+                                    .color(p.text_secondary),
                             );
                         }
 
-                        if item.changelog.is_some()
-                            && ui
+                        ui.label(
+                            RichText::new(&item.firmware)
+                                .font(font_id(ui, 12.5, OneUiFontWeight::Regular))
+                                .color(p.text_muted),
+                        );
+
+                        if let Some(notes) = item.changelog.as_ref().and_then(|c| c.notes.as_deref())
+                        {
+                            let preview: String =
+                                notes.lines().take(2).collect::<Vec<_>>().join(" ");
+                            if !preview.trim().is_empty() {
+                                Frame::NONE
+                                    .fill(p.surface_container)
+                                    .corner_radius(egui::CornerRadius::same(14))
+                                    .inner_margin(Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width().max(100.0));
+                                        ui.label(
+                                            RichText::new(preview)
+                                                .font(font_id(ui, 12.5, OneUiFontWeight::Regular))
+                                                .color(p.text_secondary),
+                                        );
+                                    });
+                            }
+                        }
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+                            if ui
                                 .add(
-                                    OneUiButton::outline("Changelog Notes")
-                                        .min_size(vec2(130.0, 34.0)),
+                                    OneUiButton::primary("Load in Downloader")
+                                        .icon(OneUiIcon::Download)
+                                        .enabled(!is_busy)
+                                        .min_size(vec2(150.0, 34.0)),
                                 )
                                 .clicked()
-                        {
-                            self.selected_changelog = Some(SelectedChangelog {
-                                item: item.clone(),
-                                model: res.model.clone(),
-                                region: res.region.clone(),
-                            });
-                            self.changelog_sheet_open = true;
-                        }
+                            {
+                                self.load_build_into_downloader(
+                                    res.model.clone(),
+                                    res.region.clone(),
+                                    item.firmware.clone(),
+                                    ui.ctx(),
+                                );
+                            }
 
-                        if ui
-                            .add(
-                                OneUiButton::new("Copy")
-                                    .icon(OneUiIcon::Copy)
-                                    .min_size(vec2(84.0, 34.0)),
-                            )
-                            .clicked()
-                        {
-                            ui.ctx().copy_text(item.firmware.clone());
-                            self.toast
-                                .show_message(ui.ctx(), "Firmware string copied", 2.0);
-                        }
+                            if item.changelog.is_some()
+                                && ui
+                                    .add(
+                                        OneUiButton::outline("Changelog Notes")
+                                            .min_size(vec2(130.0, 34.0)),
+                                    )
+                                    .clicked()
+                            {
+                                self.selected_changelog = Some(SelectedChangelog {
+                                    item: item.clone(),
+                                    model: res.model.clone(),
+                                    region: res.region.clone(),
+                                });
+                                self.changelog_sheet_open = true;
+                            }
+
+                            if ui
+                                .add(
+                                    OneUiButton::new("Copy")
+                                        .icon(OneUiIcon::Copy)
+                                        .min_size(vec2(84.0, 34.0)),
+                                )
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(item.firmware.clone());
+                                self.toast
+                                    .show_message(ui.ctx(), "Firmware string copied", 2.0);
+                            }
+                        });
                     });
-                });
-            ui.add_space(10.0);
-        }
+                ui.add_space(10.0);
+            }
+        } else {
+            let matched: Vec<(usize, &bloom_core::Changelog)> = res
+                .changelogs
+                .iter()
+                .enumerate()
+                .filter(|(_, cl)| {
+                    if query.is_empty() {
+                        return true;
+                    }
+                    cl.firmware.to_ascii_lowercase().contains(&query)
+                        || cl
+                            .android_ver
+                            .as_deref()
+                            .is_some_and(|v| v.to_ascii_lowercase().contains(&query))
+                        || cl
+                            .notes
+                            .as_deref()
+                            .is_some_and(|n| n.to_ascii_lowercase().contains(&query))
+                })
+                .collect();
 
-        if res.items.is_empty() && !res.changelogs.is_empty() {
-            SectionHeader::new("Official Changelogs").show(ui);
-            for (idx, cl) in res.changelogs.iter().enumerate() {
-                let matches_query = query.is_empty()
-                    || cl.firmware.to_ascii_lowercase().contains(&query)
-                    || cl
-                        .notes
-                        .as_deref()
-                        .is_some_and(|n| n.to_ascii_lowercase().contains(&query));
-                if !matches_query {
-                    continue;
-                }
+            OneUiPreferenceCaption::new(format!(
+                "{} ({}) • {} official changelog(s) from doc.samsungmobile.com",
+                res.model,
+                res.region,
+                matched.len(),
+            ))
+            .show(ui);
+
+            for (idx, cl) in matched {
                 CardSection::new()
                     .inner_margin(Margin::symmetric(20, 14))
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 8.0;
                         ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
                             if idx == 0 {
                                 pill_tag(ui, "LATEST", p.primary, p.on_primary);
                             }
@@ -284,12 +322,47 @@ impl BloomApp {
                                 );
                             }
                         });
-                        if let Some(ref notes) = cl.notes {
+
+                        let mut meta = Vec::new();
+                        if let Some(ref date) = cl.rel_date {
+                            meta.push(format!("Released: {date}"));
+                        }
+                        if let Some(ref patch) = cl.sec_patch {
+                            meta.push(format!("Security Patch: {patch}"));
+                        }
+                        if !meta.is_empty() {
                             ui.label(
-                                RichText::new(notes)
-                                    .font(font_id(ui, 13.5, OneUiFontWeight::Regular))
+                                RichText::new(meta.join("  •  "))
+                                    .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
                                     .color(p.text_secondary),
                             );
+                        }
+
+                        if let Some(ref notes) = cl.notes {
+                            Frame::NONE
+                                .fill(p.surface_container)
+                                .corner_radius(egui::CornerRadius::same(14))
+                                .inner_margin(Margin::symmetric(14, 10))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width().max(100.0));
+                                    ui.label(
+                                        RichText::new(notes)
+                                            .font(font_id(ui, 13.5, OneUiFontWeight::Regular))
+                                            .color(p.text_primary),
+                                    );
+                                });
+                            if ui
+                                .add(
+                                    OneUiButton::new("Copy Notes")
+                                        .icon(OneUiIcon::Copy)
+                                        .min_size(vec2(118.0, 32.0)),
+                                )
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(notes.clone());
+                                self.toast
+                                    .show_message(ui.ctx(), "Changelog notes copied", 2.0);
+                            }
                         }
                     });
                 ui.add_space(10.0);

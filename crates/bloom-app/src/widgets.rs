@@ -3,8 +3,9 @@ use egui::{
     Response, RichText, Stroke, TextEdit, Ui,
 };
 use egui_oneui::prelude::*;
+use egui_oneui::tokens::dimens;
 
-/// Samsung One UI 9 styled text field with optional caption badge chip on the right.
+/// Samsung One UI 9 styled `26dp` capsule field with optional caption badge chip on the right.
 pub fn labeled_text_field(
     ui: &mut Ui,
     label: &str,
@@ -19,6 +20,7 @@ pub fn labeled_text_field(
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
         ui.horizontal(|ui| {
+            ui.add_space(4.0);
             ui.label(
                 RichText::new(label)
                     .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
@@ -36,13 +38,21 @@ pub fn labeled_text_field(
         });
 
         let avail = ui.available_width().max(100.0);
+        let focus_id = ui.make_persistent_id(label).with("focus_check");
+        let focused = ui.ctx().data(|d| d.get_temp::<bool>(focus_id)).unwrap_or(false);
+        let stroke = if focused && enabled {
+            Stroke::new(1.4, p.primary)
+        } else {
+            Stroke::new(dimens::SEARCH_BOTTOM_STROKE.max(0.8), p.floating_stroke)
+        };
+
         let frame_resp = Frame::NONE
             .fill(p.surface_container)
-            .corner_radius(CornerRadius::same(16))
-            .stroke(Stroke::new(1.0, p.outline.gamma_multiply(0.55)))
-            .inner_margin(Margin::symmetric(14, 10))
+            .corner_radius(CornerRadius::same(dimens::SEARCH_PLATE_RADIUS))
+            .stroke(stroke)
+            .inner_margin(Margin::symmetric(18, 12))
             .show(ui, |ui| {
-                ui.set_width((avail - 28.0).max(72.0));
+                ui.set_width((avail - 36.0).max(72.0));
                 ui.add_enabled(
                     enabled,
                     TextEdit::singleline(value)
@@ -50,17 +60,20 @@ pub fn labeled_text_field(
                         .margin(Margin::ZERO)
                         .align(Align2::LEFT_CENTER)
                         .desired_width(f32::INFINITY)
-                        .font(FontId::new(15.0, FontFamily::Proportional))
+                        .font(FontId::new(15.5, FontFamily::Proportional))
                         .text_color(if enabled {
                             p.text_primary
                         } else {
                             p.text_disabled
                         })
-                        .hint_text(RichText::new(hint).size(14.5).color(p.text_muted)),
+                        .hint_text(RichText::new(hint).size(15.0).color(p.text_muted)),
                 )
             });
 
-        frame_resp.inner
+        let resp = frame_resp.inner;
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(focus_id, resp.has_focus()));
+        resp
     })
     .inner
 }
@@ -141,22 +154,32 @@ pub fn path_picker_field(
     let edit_resp = ui
         .vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
-            ui.label(
-                RichText::new(label)
-                    .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
-                    .color(p.text_muted),
-            );
+            ui.horizontal(|ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(label)
+                        .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
+                        .color(p.text_muted),
+                );
+            });
 
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
-                let btn_reserve = 112.0;
-                let field_w = (ui.available_width() - btn_reserve - 28.0).max(110.0);
+                let btn_reserve = 114.0;
+                let field_w = (ui.available_width() - btn_reserve - 36.0).max(110.0);
+                let focus_id = ui.make_persistent_id(label).with("path_focus");
+                let focused = ui.ctx().data(|d| d.get_temp::<bool>(focus_id)).unwrap_or(false);
+                let stroke = if focused && enabled {
+                    Stroke::new(1.4, p.primary)
+                } else {
+                    Stroke::new(dimens::SEARCH_BOTTOM_STROKE.max(0.8), p.floating_stroke)
+                };
 
                 let resp = Frame::NONE
                     .fill(p.surface_container)
-                    .corner_radius(CornerRadius::same(16))
-                    .stroke(Stroke::new(1.0, p.outline.gamma_multiply(0.55)))
-                    .inner_margin(Margin::symmetric(14, 10))
+                    .corner_radius(CornerRadius::same(dimens::SEARCH_PLATE_RADIUS))
+                    .stroke(stroke)
+                    .inner_margin(Margin::symmetric(18, 12))
                     .show(ui, |ui| {
                         ui.set_width(field_w);
                         ui.add_enabled(
@@ -166,28 +189,32 @@ pub fn path_picker_field(
                                 .margin(Margin::ZERO)
                                 .align(Align2::LEFT_CENTER)
                                 .desired_width(f32::INFINITY)
-                                .font(FontId::new(14.5, FontFamily::Proportional))
+                                .font(FontId::new(15.0, FontFamily::Proportional))
                                 .text_color(if enabled {
                                     p.text_primary
                                 } else {
                                     p.text_disabled
                                 })
-                                .hint_text(RichText::new(hint).size(14.0).color(p.text_muted)),
+                                .hint_text(RichText::new(hint).size(14.5).color(p.text_muted)),
                         )
                     });
+
+                let inner_resp = resp.inner;
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(focus_id, inner_resp.has_focus()));
 
                 if ui
                     .add(
                         OneUiButton::outline(button_label)
                             .enabled(enabled)
-                            .min_size(vec2(98.0, 38.0)),
+                            .min_size(vec2(98.0, 42.0)),
                     )
                     .clicked()
                 {
                     browse_clicked = true;
                 }
 
-                resp.inner
+                inner_resp
             })
             .inner
         })

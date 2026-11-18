@@ -1,7 +1,7 @@
 use egui::{vec2, Align, Frame, Layout, Margin, RichText, Ui};
 use egui_oneui::prelude::*;
 
-use crate::state::ACCENT_PRESETS;
+use crate::state::{BloomPage, ACCENT_PRESETS};
 use crate::widgets::labeled_text_field;
 use crate::BloomApp;
 
@@ -174,5 +174,28 @@ impl BloomApp {
                     self.reset_dialog_open = true;
                 }
             });
+
+        ui.add_space(14.0);
+        let links = [
+            "Firmware Download Workspace",
+            "History & Changelogs",
+            "CSC Region Lookup",
+        ];
+        if let Some(idx) = RelativeLinksCard::new(&links).show(ui) {
+            self.page_id = match idx {
+                0 => BloomPage::Download.id(),
+                1 => BloomPage::History.id(),
+                _ => BloomPage::Csc.id(),
+            };
+        }
+
+        if OneUiPreferenceCaption::new(
+            "One UI 9 (SESL9) tokens, floating chrome & bundled Roboto Flex typography.",
+        )
+        .link("About Project Bloom")
+        .show(ui)
+        {
+            self.page_id = BloomPage::About.id();
+        }
     }
 }

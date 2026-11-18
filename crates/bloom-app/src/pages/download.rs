@@ -4,7 +4,10 @@ use bloom_core::JobStage;
 use egui::{vec2, Frame, Margin, RichText, Ui};
 use egui_oneui::prelude::*;
 
-use crate::state::{format_bytes, format_eta, open_folder_in_os, resume_progress, BloomPage};
+use crate::state::{
+    derive_decrypted_output, format_bytes, format_eta, open_folder_in_os, resume_progress,
+    BloomPage,
+};
 use crate::widgets::{
     key_value_row, labeled_text_field, model_csc_inputs, path_picker_field, pill_tag, status_banner,
 };
@@ -17,7 +20,6 @@ impl BloomApp {
                 g.checking,
                 g.downloading,
                 g.paused,
-                g.decrypting,
                 g.is_busy(),
                 g.error_message.clone(),
                 g.status_message.clone(),
@@ -35,7 +37,6 @@ impl BloomApp {
             checking,
             downloading,
             paused,
-            _decrypting,
             is_busy,
             error_message,
             status_message,
@@ -51,12 +52,44 @@ impl BloomApp {
         let theme = theme_from_ui(ui);
         let p = &theme.palette;
 
-        // Error or status notification banner
+        // Top One UI 9 master SwitchBar (Auto-fetch latest vs Manual build)
+        if ui
+            .add_enabled(
+                !is_busy,
+                OneUiSwitchBar::new(&mut self.config.auto_fw)
+                    .labels("Auto-fetch latest firmware", "Manual firmware build")
+                    .show_progress(checking),
+            )
+            .changed()
+        {
+            if let Ok(mut g) = self.shared.lock() {
+                g.clear_checked();
+            }
+        }
+        ui.add_space(10.0);
+
+        if self.config.show_download_tip {
+            let tip_resp = TipsCard::new(
+                "Downloads auto-recover from drops or expired Samsung 401 tokens. Pause anytime cleanly.",
+            )
+            .title("Crash-Proof & Auto-Resume")
+            .action("Dismiss")
+            .show(ui);
+            if tip_resp.dismissed || tip_resp.clicked_action.is_some() {
+                self.config.show_download_tip = false;
+            }
+            ui.add_space(10.0);
+        }
+
         if let Some(err) = error_message.as_deref() {
             status_banner(ui, OneUiIcon::Info, p.functional_red, "Action Failed", Some(err));
             ui.add_space(10.0);
         } else if !status_message.is_empty() && !downloading && last_outcome.is_none() {
-            let accent = if paused { p.functional_orange } else { p.primary_high };
+            let accent = if paused {
+                p.functional_orange
+            } else {
+                p.primary_high
+            };
             let title = if paused { "Download Paused" } else { "Status" };
             status_banner(ui, OneUiIcon::Info, accent, title, Some(&status_message));
             ui.add_space(10.0);
@@ -264,8 +297,7 @@ impl BloomApp {
                                 && ui.add(OneUiButton::outline("Send to Decrypt")).clicked()
                             {
                                 let enc = outcome.encrypted_path.display().to_string();
-                                self.decrypt_form.output_path =
-                                    crate::state::derive_decrypted_output(&enc);
+                                self.decrypt_form.output_path = derive_decrypted_output(&enc);
                                 self.decrypt_form.input_path = enc;
                                 self.decrypt_form.model = self.config.model.clone();
                                 self.decrypt_form.csc = self.config.csc.clone();
@@ -279,10 +311,10 @@ impl BloomApp {
                 });
         }
 
-        // Device & Firmware input card
+        // Device & Firmware target card
         SectionHeader::new("Device & Firmware").show(ui);
         CardSection::new()
-            .inner_margin(Margin::symmetric(0, 8))
+            .inner_margin(Margin::symmetric(0, 6))
             .show(ui, |ui| {
                 Frame::NONE
                     .inner_margin(Margin::symmetric(20, 12))
@@ -330,68 +362,23 @@ impl BloomApp {
                         }
                     });
 
-                SwitchItem::new(&mut self.config.auto_fw, "Auto-fetch latest firmware")
-                    .icon(OneUiIcon::Refresh)
-                    .summary_states(
-                        "Queries Samsung FUS & SmartHistory automatically",
-                        "Download explicit PDA/CSC/CP/DATA firmware build",
+                if ui
+                    .add(
+                        CardItem::new("Browse CSC regions")
+                            .icon(OneUiIcon::Location)
+                            .summary(format!(
+                                "Current region: {}",
+                                self.config.csc.trim().to_ascii_uppercase()
+                            ))
+                            .summary_highlight(true)
+                            .chevron()
+                            .top_divider(true)
+                            .enabled(!is_busy),
                     )
-                    .user_updatable_summary(true)
-                    .top_divider(true)
-                    .enabled(!is_busy)
-                    .show(ui);
-
-                paint_divider(ui, DividerInset::FullWidth);
-                Frame::NONE
-                    .inner_margin(Margin::symmetric(20, 12))
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
-                            if ui
-                                .add(
-                                    OneUiButton::primary("Check Latest")
-                                        .icon(OneUiIcon::Search)
-                                        .loading(checking)
-                                        .enabled(!is_busy),
-                                )
-                                .clicked()
-                            {
-                                self.trigger_check(ui.ctx());
-                            }
-
-                            let dl_label = if paused {
-                                "Resume Download"
-                            } else {
-                                "Start Download"
-                            };
-                            if ui
-                                .add(
-                                    OneUiButton::contained_primary(dl_label)
-                                        .icon(OneUiIcon::Download)
-                                        .loading(downloading)
-                                        .enabled(!is_busy),
-                                )
-                                .clicked()
-                            {
-                                self.trigger_download(ui.ctx(), None);
-                            }
-
-                            if downloading {
-                                if ui.add(OneUiButton::outline("Pause")).clicked() {
-                                    self.pause_download();
-                                }
-                                if ui
-                                    .add(
-                                        OneUiButton::new("Cancel")
-                                            .style(OneUiButtonStyle::Destructive),
-                                    )
-                                    .clicked()
-                                {
-                                    self.cancel_download();
-                                }
-                            }
-                        });
-                    });
+                    .clicked()
+                {
+                    self.page_id = BloomPage::Csc.id();
+                }
             });
 
         // Checked firmware metadata card
@@ -497,32 +484,67 @@ impl BloomApp {
         CardSection::new()
             .inner_margin(Margin::symmetric(0, 6))
             .show(ui, |ui| {
+                if ui
+                    .add(
+                        CardItem::new("Output folder")
+                            .icon(OneUiIcon::Apps)
+                            .summary(&self.config.output_dir)
+                            .summary_highlight(true)
+                            .chevron()
+                            .enabled(!is_busy),
+                    )
+                    .clicked()
+                {
+                    let cur = Path::new(&self.config.output_dir);
+                    let mut dlg = rfd::FileDialog::new();
+                    if cur.is_dir() {
+                        dlg = dlg.set_directory(cur);
+                    }
+                    if let Some(folder) = dlg.pick_folder() {
+                        self.config.output_dir = folder.display().to_string();
+                        self.refresh_resumable();
+                    }
+                }
+
+                SwitchItem::new(&mut self.edit_output_path_inline, "Edit output path manually")
+                    .summary("Show text input to paste or type a custom folder path")
+                    .top_divider(true)
+                    .enabled(!is_busy)
+                    .show(ui);
+
+                if self.edit_output_path_inline {
+                    Frame::NONE
+                        .inner_margin(Margin::symmetric(20, 10))
+                        .show(ui, |ui| {
+                            let (path_resp, browse) = path_picker_field(
+                                ui,
+                                "Custom Folder Path",
+                                &mut self.config.output_dir,
+                                "./downloads",
+                                "Browse",
+                                !is_busy,
+                            );
+                            if browse {
+                                let cur = Path::new(&self.config.output_dir);
+                                let mut dlg = rfd::FileDialog::new();
+                                if cur.is_dir() {
+                                    dlg = dlg.set_directory(cur);
+                                }
+                                if let Some(folder) = dlg.pick_folder() {
+                                    self.config.output_dir = folder.display().to_string();
+                                    self.refresh_resumable();
+                                }
+                            } else if path_resp.lost_focus() {
+                                self.refresh_resumable();
+                            }
+                        });
+                }
+
+                paint_divider(ui, DividerInset::Standard);
                 Frame::NONE
                     .inner_margin(Margin::symmetric(20, 12))
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 14.0;
-                        let (path_resp, browse) = path_picker_field(
-                            ui,
-                            "Output Directory",
-                            &mut self.config.output_dir,
-                            "./downloads",
-                            "Browse",
-                            !is_busy,
-                        );
-                        if browse {
-                            let cur = Path::new(&self.config.output_dir);
-                            let mut dlg = rfd::FileDialog::new();
-                            if cur.is_dir() {
-                                dlg = dlg.set_directory(cur);
-                            }
-                            if let Some(folder) = dlg.pick_folder() {
-                                self.config.output_dir = folder.display().to_string();
-                                self.refresh_resumable();
-                            }
-                        } else if path_resp.lost_focus() {
-                            self.refresh_resumable();
-                        }
-
                         let mut conn_f = self.config.connections.clamp(1, 32) as f32;
                         if ui
                             .add_enabled(
@@ -589,5 +611,30 @@ impl BloomApp {
                 .enabled(!is_busy && self.config.decrypt_after_download)
                 .show(ui);
             });
+
+        ui.add_space(14.0);
+        let links = [
+            "Firmware History & Changelogs",
+            "Decrypt Existing Package",
+            "Appearance & FUS Settings",
+        ];
+        if let Some(idx) = RelativeLinksCard::new(&links).show(ui) {
+            self.page_id = match idx {
+                0 => BloomPage::History.id(),
+                1 => BloomPage::Decrypt.id(),
+                _ => BloomPage::Settings.id(),
+            };
+        }
+
+        if OneUiPreferenceCaption::new(
+            "Segmented HTTP Range downloader with crash-proof checkpoints and 401 session refresh.",
+        )
+        .link("About Project Bloom")
+        .show(ui)
+        {
+            self.page_id = BloomPage::About.id();
+        }
+        // Clear height for the bottom floating DividerButtonLayout capsule
+        ui.add_space(92.0);
     }
 }

@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use egui::{vec2, Frame, Margin, RichText, Ui};
+use egui::{Frame, Margin, RichText, Ui};
 use egui_oneui::prelude::*;
 
-use crate::state::{derive_decrypted_output, format_bytes, format_eta, open_folder_in_os};
+use crate::state::{derive_decrypted_output, format_bytes, format_eta, open_folder_in_os, BloomPage};
 use crate::widgets::{
     labeled_text_field, model_csc_inputs, path_picker_field, pill_tag, status_banner,
 };
@@ -14,7 +14,6 @@ impl BloomApp {
         let snap = match self.shared.lock() {
             Ok(g) => (
                 g.decrypting,
-                g.is_busy(),
                 g.error_message.clone(),
                 g.decrypt_progress,
                 g.last_decrypted_path.clone(),
@@ -22,13 +21,18 @@ impl BloomApp {
             ),
             Err(_) => return,
         };
-        let (decrypting, is_busy, error_message, decrypt_progress, last_decrypted_path, resolved_fw) =
-            snap;
+        let (decrypting, error_message, decrypt_progress, last_decrypted_path, resolved_fw) = snap;
         let theme = theme_from_ui(ui);
         let p = &theme.palette;
 
         if let Some(err) = error_message.as_deref() {
-            status_banner(ui, OneUiIcon::Info, p.functional_red, "Decryption Failed", Some(err));
+            status_banner(
+                ui,
+                OneUiIcon::Info,
+                p.functional_red,
+                "Decryption Failed",
+                Some(err),
+            );
             ui.add_space(10.0);
         }
 
@@ -36,18 +40,24 @@ impl BloomApp {
             .top_space(4.0)
             .show(ui);
         CardSection::new()
-            .inner_margin(Margin::symmetric(20, 14))
+            .inner_margin(Margin::symmetric(0, 6))
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 12.0;
-                let (in_resp, in_browse) = path_picker_field(
-                    ui,
-                    "Encrypted Package (.enc4 / .enc2)",
-                    &mut self.decrypt_form.input_path,
-                    "Select a downloaded .enc4 or .enc2 file",
-                    "Browse",
-                    !decrypting,
-                );
-                if in_browse {
+                let in_summary = if self.decrypt_form.input_path.trim().is_empty() {
+                    "Tap to select an .enc4 or .enc2 file".to_owned()
+                } else {
+                    self.decrypt_form.input_path.clone()
+                };
+                if ui
+                    .add(
+                        CardItem::new("Encrypted package (.enc4 / .enc2)")
+                            .icon(OneUiIcon::Shield)
+                            .summary(in_summary)
+                            .summary_highlight(!self.decrypt_form.input_path.trim().is_empty())
+                            .chevron()
+                            .enabled(!decrypting),
+                    )
+                    .clicked()
+                {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Samsung Encrypted Firmware", &["enc4", "enc2"])
                         .add_filter("All Files", &["*"])
@@ -57,20 +67,25 @@ impl BloomApp {
                         self.decrypt_form.output_path = derive_decrypted_output(&p_str);
                         self.decrypt_form.input_path = p_str;
                     }
-                } else if in_resp.changed() && self.decrypt_form.output_path.trim().is_empty() {
-                    self.decrypt_form.output_path =
-                        derive_decrypted_output(&self.decrypt_form.input_path);
                 }
 
-                let (_, out_browse) = path_picker_field(
-                    ui,
-                    "Output Archive (.zip)",
-                    &mut self.decrypt_form.output_path,
-                    "Auto-derived by stripping .enc4 / .enc2",
-                    "Save As",
-                    !decrypting,
-                );
-                if out_browse {
+                let out_summary = if self.decrypt_form.output_path.trim().is_empty() {
+                    "Auto-derived by removing .enc4 / .enc2 suffix".to_owned()
+                } else {
+                    self.decrypt_form.output_path.clone()
+                };
+                if ui
+                    .add(
+                        CardItem::new("Output archive (.zip)")
+                            .icon(OneUiIcon::Apps)
+                            .summary(out_summary)
+                            .summary_highlight(!self.decrypt_form.output_path.trim().is_empty())
+                            .chevron()
+                            .top_divider(true)
+                            .enabled(!decrypting),
+                    )
+                    .clicked()
+                {
                     let default_name = Path::new(&self.decrypt_form.output_path)
                         .file_name()
                         .and_then(|s| s.to_str())
@@ -82,6 +97,69 @@ impl BloomApp {
                     {
                         self.decrypt_form.output_path = path.display().to_string();
                     }
+                }
+
+                SwitchItem::new(
+                    &mut self.edit_decrypt_paths_inline,
+                    "Edit file paths manually",
+                )
+                .summary("Expand text fields to paste paths directly")
+                .top_divider(true)
+                .enabled(!decrypting)
+                .show(ui);
+
+                if self.edit_decrypt_paths_inline {
+                    Frame::NONE
+                        .inner_margin(Margin::symmetric(20, 12))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 12.0;
+                            let (in_resp, in_browse) = path_picker_field(
+                                ui,
+                                "Input Path",
+                                &mut self.decrypt_form.input_path,
+                                "Select .enc4 or .enc2 file",
+                                "Browse",
+                                !decrypting,
+                            );
+                            if in_browse {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("Samsung Encrypted Firmware", &["enc4", "enc2"])
+                                    .add_filter("All Files", &["*"])
+                                    .pick_file()
+                                {
+                                    let p_str = path.display().to_string();
+                                    self.decrypt_form.output_path = derive_decrypted_output(&p_str);
+                                    self.decrypt_form.input_path = p_str;
+                                }
+                            } else if in_resp.changed()
+                                && self.decrypt_form.output_path.trim().is_empty()
+                            {
+                                self.decrypt_form.output_path =
+                                    derive_decrypted_output(&self.decrypt_form.input_path);
+                            }
+
+                            let (_, out_browse) = path_picker_field(
+                                ui,
+                                "Output Path",
+                                &mut self.decrypt_form.output_path,
+                                "Auto-derived .zip output path",
+                                "Save As",
+                                !decrypting,
+                            );
+                            if out_browse {
+                                let default_name = Path::new(&self.decrypt_form.output_path)
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("firmware.zip");
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("ZIP Archive", &["zip"])
+                                    .set_file_name(default_name)
+                                    .save_file()
+                                {
+                                    self.decrypt_form.output_path = path.display().to_string();
+                                }
+                            }
+                        });
                 }
             });
 
@@ -133,42 +211,6 @@ impl BloomApp {
                                 !decrypting,
                             );
                         } else {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("Target Metadata")
-                                        .font(font_id(ui, 13.5, OneUiFontWeight::Medium))
-                                        .color(p.text_muted),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui
-                                            .add(
-                                                OneUiButton::new("Sync from Download")
-                                                    .enabled(!decrypting)
-                                                    .min_size(vec2(148.0, 30.0)),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.decrypt_form.model = self.config.model.clone();
-                                            self.decrypt_form.csc = self.config.csc.clone();
-                                            self.decrypt_form.imei = self.config.imei.clone();
-                                            if let Some(ref fw) = resolved_fw {
-                                                self.decrypt_form.fw = fw.clone();
-                                            } else if !self.config.manual_fw.is_empty() {
-                                                self.decrypt_form.fw =
-                                                    self.config.manual_fw.clone();
-                                            }
-                                            self.toast.show_message(
-                                                ui.ctx(),
-                                                "Copied model & CSC from Download page",
-                                                2.0,
-                                            );
-                                        }
-                                    },
-                                );
-                            });
-
                             model_csc_inputs(
                                 ui,
                                 &mut self.decrypt_form.model,
@@ -199,21 +241,6 @@ impl BloomApp {
                                 !decrypting,
                             );
                         }
-
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add(
-                                    OneUiButton::contained_primary("Decrypt Firmware")
-                                        .icon(OneUiIcon::Shield)
-                                        .loading(decrypting)
-                                        .enabled(!is_busy),
-                                )
-                                .clicked()
-                            {
-                                self.trigger_decrypt(ui.ctx());
-                            }
-                        });
                     });
             });
 
@@ -313,5 +340,33 @@ impl BloomApp {
                     }
                 });
         }
+
+        ui.add_space(14.0);
+        let links = ["Back to Firmware Download", "History & Changelogs"];
+        if let Some(idx) = RelativeLinksCard::new(&links).show(ui) {
+            self.page_id = match idx {
+                0 => BloomPage::Download.id(),
+                _ => BloomPage::History.id(),
+            };
+        }
+
+        if let Some(ref fw) = resolved_fw {
+            OneUiPreferenceCaption::new(format!("Active session build: {fw}")).show(ui);
+        }
+        ui.add_space(92.0);
+    }
+
+    pub fn sync_decrypt_from_download(&mut self, ctx: &egui::Context) {
+        let resolved_fw = self.shared.lock().ok().and_then(|g| g.resolved_fw.clone());
+        self.decrypt_form.model = self.config.model.clone();
+        self.decrypt_form.csc = self.config.csc.clone();
+        self.decrypt_form.imei = self.config.imei.clone();
+        if let Some(fw) = resolved_fw {
+            self.decrypt_form.fw = fw;
+        } else if !self.config.manual_fw.is_empty() {
+            self.decrypt_form.fw = self.config.manual_fw.clone();
+        }
+        self.toast
+            .show_message(ctx, "Synced Model, CSC & Firmware from Download", 2.0);
     }
 }

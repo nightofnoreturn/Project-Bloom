@@ -105,6 +105,7 @@ pub struct AppConfig {
     pub accent_rgb: [u8; 3],
     pub typography_idx: usize,
     pub history_lang_idx: usize,
+    pub show_download_tip: bool,
 }
 
 impl Default for AppConfig {
@@ -127,6 +128,7 @@ impl Default for AppConfig {
             accent_rgb: [0x38, 0x7A, 0xFF],
             typography_idx: 0,
             history_lang_idx: 0,
+            show_download_tip: true,
         }
     }
 }
@@ -145,6 +147,12 @@ pub fn default_output_dir() -> String {
     std::env::current_dir()
         .map(|p| p.join("downloads").to_string_lossy().into_owned())
         .unwrap_or_else(|_| "./downloads".to_owned())
+}
+
+#[derive(Debug, Clone)]
+pub enum SnackAction {
+    OpenFolder(PathBuf),
+    RestoreConfig(Box<AppConfig>),
 }
 
 #[derive(Debug, Default)]
@@ -167,6 +175,7 @@ pub struct SharedUiState {
     pub status_message: String,
     pub error_message: Option<String>,
     pub pending_toast: Option<String>,
+    pub pending_snack: Option<(String, Option<&'static str>, SnackAction)>,
     pub active_handle: Option<DownloadHandle>,
 }
 

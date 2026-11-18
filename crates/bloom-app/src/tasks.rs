@@ -9,7 +9,9 @@ use bloom_core::{
     FusClient, FusMode, ImeiDb, LatestVersionInfo,
 };
 
-use crate::state::{derive_decrypted_output, format_bytes, AppConfig, DecryptForm, SharedUiState};
+use crate::state::{
+    derive_decrypted_output, format_bytes, AppConfig, DecryptForm, SharedUiState, SnackAction,
+};
 
 async fn resolve_fw_version(
     explicit_fw: Option<String>,
@@ -323,7 +325,11 @@ pub fn spawn_download(
                     guard.last_outcome = Some(outcome);
                     guard.error_message = None;
                     guard.status_message = format!("Completed: {}", done_path.display());
-                    guard.pending_toast = Some("Firmware download complete!".to_owned());
+                    guard.pending_snack = Some((
+                        "Firmware download finished".to_owned(),
+                        Some("Open"),
+                        SnackAction::OpenFolder(done_path),
+                    ));
                 }
             }
             Err(BloomError::Paused) => {
@@ -516,7 +522,11 @@ pub fn spawn_manual_decrypt(
                         format_bytes(bytes_written),
                         out_path.display()
                     );
-                    guard.pending_toast = Some("Firmware decrypted cleanly!".to_owned());
+                    guard.pending_snack = Some((
+                        "Firmware decrypted cleanly".to_owned(),
+                        Some("Open"),
+                        SnackAction::OpenFolder(out_path),
+                    ));
                 }
             }
             Ok(Err(e)) => {
