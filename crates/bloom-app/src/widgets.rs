@@ -5,6 +5,61 @@ use egui::{
 use egui_oneui::prelude::*;
 use egui_oneui::tokens::dimens;
 
+fn singleline_capsule(
+    ui: &mut Ui,
+    focus_key: (&str, &str),
+    value: &mut String,
+    hint: &str,
+    field_w: f32,
+    font_size: f32,
+    enabled: bool,
+) -> Response {
+    let theme = theme_from_ui(ui);
+    let p = &theme.palette;
+    let focus_id = ui.make_persistent_id(focus_key.0).with(focus_key.1);
+    let focused = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(focus_id))
+        .unwrap_or(false);
+    let stroke = if focused && enabled {
+        Stroke::new(1.4, p.primary)
+    } else {
+        Stroke::new(dimens::SEARCH_BOTTOM_STROKE.max(0.8), p.floating_stroke)
+    };
+
+    let resp = Frame::NONE
+        .fill(p.surface_container)
+        .corner_radius(CornerRadius::same(dimens::SEARCH_PLATE_RADIUS))
+        .stroke(stroke)
+        .inner_margin(Margin::symmetric(18, 12))
+        .show(ui, |ui| {
+            ui.set_width(field_w);
+            ui.add_enabled(
+                enabled,
+                TextEdit::singleline(value)
+                    .frame(Frame::NONE)
+                    .margin(Margin::ZERO)
+                    .align(Align2::LEFT_CENTER)
+                    .desired_width(field_w)
+                    .font(FontId::new(font_size, FontFamily::Proportional))
+                    .text_color(if enabled {
+                        p.text_primary
+                    } else {
+                        p.text_disabled
+                    })
+                    .hint_text(RichText::new(hint).size(font_size - 0.5).color(p.text_muted)),
+            )
+        })
+        .inner;
+
+    // Read focus state before locking `ctx.data_mut`, because `has_focus()` reads `ctx.memory`
+    // and nesting it inside `data_mut` re-entrantly locks the same `Memory` RwLock.
+    let now_focused = resp.has_focus();
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(focus_id, now_focused));
+    resp
+}
+
 /// Samsung One UI 9 styled `26dp` capsule field with optional caption badge chip on the right.
 pub fn labeled_text_field(
     ui: &mut Ui,
@@ -14,18 +69,8 @@ pub fn labeled_text_field(
     caption: Option<&str>,
     enabled: bool,
 ) -> Response {
-    let log_frame = !crate::FIRST_FRAME_DONE.load(std::sync::atomic::Ordering::Relaxed);
-    if log_frame {
-        crate::log_startup_stage(&format!("5.3d3-field pre-theme: {label}"));
-    }
     let theme = theme_from_ui(ui);
     let p = &theme.palette;
-    if log_frame {
-        crate::log_startup_stage(&format!(
-            "5.3d3-field enter: {label} (avail={:.1})",
-            ui.available_width()
-        ));
-    }
 
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
@@ -37,9 +82,6 @@ pub fn labeled_text_field(
                     .color(p.text_muted),
             );
             if let Some(cap) = caption {
-                if log_frame {
-                    crate::log_startup_stage(&format!("5.3d3-field caption rtl: {label}"));
-                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(
                         RichText::new(cap)
@@ -52,56 +94,7 @@ pub fn labeled_text_field(
 
         let avail = ui.available_width().max(100.0);
         let field_w = (avail - 36.0).max(72.0);
-        let focus_id = ui.make_persistent_id(label).with("focus_check");
-        let focused = ui.ctx().data(|d| d.get_temp::<bool>(focus_id)).unwrap_or(false);
-        let stroke = if focused && enabled {
-            Stroke::new(1.4, p.primary)
-        } else {
-            Stroke::new(dimens::SEARCH_BOTTOM_STROKE.max(0.8), p.floating_stroke)
-        };
-
-        if log_frame {
-            crate::log_startup_stage(&format!(
-                "5.3d3-field TextEdit: {label} (field_w={field_w:.1})"
-            ));
-        }
-        let frame_resp = Frame::NONE
-            .fill(p.surface_container)
-            .corner_radius(CornerRadius::same(dimens::SEARCH_PLATE_RADIUS))
-            .stroke(stroke)
-            .inner_margin(Margin::symmetric(18, 12))
-            .show(ui, |ui| {
-                ui.set_width(field_w);
-                ui.add_enabled(
-                    enabled,
-                    TextEdit::singleline(value)
-                        .frame(Frame::NONE)
-                        .margin(Margin::ZERO)
-                        .align(Align2::LEFT_CENTER)
-                        .desired_width(field_w)
-                        .font(FontId::new(15.5, FontFamily::Proportional))
-                        .text_color(if enabled {
-                            p.text_primary
-                        } else {
-                            p.text_disabled
-                        })
-                        .hint_text(RichText::new(hint).size(15.0).color(p.text_muted)),
-                )
-            });
-
-        if log_frame {
-            crate::log_startup_stage(&format!("5.3d3-field done: {label}"));
-        }
-        let resp = frame_resp.inner;
-        if log_frame {
-            crate::log_startup_stage(&format!("5.3d3-field pre-datamut: {label}"));
-        }
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(focus_id, resp.has_focus()));
-        if log_frame {
-            crate::log_startup_stage(&format!("5.3d3-field post-datamut: {label}"));
-        }
-        resp
+        singleline_capsule(ui, (label, "focus_check"), value, hint, field_w, 15.5, enabled)
     })
     .inner
 }
@@ -115,11 +108,7 @@ pub fn model_csc_inputs(
     enabled: bool,
 ) -> bool {
     let mut changed = false;
-    let log_frame = !crate::FIRST_FRAME_DONE.load(std::sync::atomic::Ordering::Relaxed);
     if ui.available_width() >= 520.0 {
-        if log_frame {
-            crate::log_startup_stage("5.3d3-wide columns");
-        }
         ui.columns(2, |cols| {
             if labeled_text_field(
                 &mut cols[0],
@@ -133,9 +122,6 @@ pub fn model_csc_inputs(
             {
                 model.make_ascii_uppercase();
                 changed = true;
-            }
-            if log_frame {
-                crate::log_startup_stage("5.3d3-wide post-col0");
             }
             if labeled_text_field(
                 &mut cols[1],
@@ -152,9 +138,6 @@ pub fn model_csc_inputs(
             }
         });
     } else {
-        if log_frame {
-            crate::log_startup_stage("5.3d3-narrow stacked");
-        }
         if labeled_text_field(ui, "Device Model", model, "e.g. SM-S928B", None, enabled).changed() {
             model.make_ascii_uppercase();
             changed = true;
@@ -205,41 +188,15 @@ pub fn path_picker_field(
                 ui.spacing_mut().item_spacing.x = 10.0;
                 let btn_reserve = 114.0;
                 let field_w = (ui.available_width() - btn_reserve - 36.0).max(110.0);
-                let focus_id = ui.make_persistent_id(label).with("path_focus");
-                let focused = ui.ctx().data(|d| d.get_temp::<bool>(focus_id)).unwrap_or(false);
-                let stroke = if focused && enabled {
-                    Stroke::new(1.4, p.primary)
-                } else {
-                    Stroke::new(dimens::SEARCH_BOTTOM_STROKE.max(0.8), p.floating_stroke)
-                };
-
-                let resp = Frame::NONE
-                    .fill(p.surface_container)
-                    .corner_radius(CornerRadius::same(dimens::SEARCH_PLATE_RADIUS))
-                    .stroke(stroke)
-                    .inner_margin(Margin::symmetric(18, 12))
-                    .show(ui, |ui| {
-                        ui.set_width(field_w);
-                        ui.add_enabled(
-                            enabled,
-                            TextEdit::singleline(value)
-                                .frame(Frame::NONE)
-                                .margin(Margin::ZERO)
-                                .align(Align2::LEFT_CENTER)
-                                .desired_width(field_w)
-                                .font(FontId::new(15.0, FontFamily::Proportional))
-                                .text_color(if enabled {
-                                    p.text_primary
-                                } else {
-                                    p.text_disabled
-                                })
-                                .hint_text(RichText::new(hint).size(14.5).color(p.text_muted)),
-                        )
-                    });
-
-                let inner_resp = resp.inner;
-                ui.ctx()
-                    .data_mut(|d| d.insert_temp(focus_id, inner_resp.has_focus()));
+                let inner_resp = singleline_capsule(
+                    ui,
+                    (label, "path_focus"),
+                    value,
+                    hint,
+                    field_w,
+                    15.0,
+                    enabled,
+                );
 
                 if ui
                     .add(
