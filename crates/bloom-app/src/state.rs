@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use bloom_core::{
-    BinaryFileInfo, DownloadHandle, DownloadOutcome, DownloadStateFile, FusMode, HistoryItem,
-    HistoryResult, LatestVersionInfo, ProgressSnapshot,
-};
+use bloom_core::{DeviceCatalog, HistoryItem, HistoryResult};
 use egui::Color32;
 use egui_oneui::prelude::OneUiIcon;
 use serde::{Deserialize, Serialize};
@@ -20,7 +18,7 @@ pub const ACCENT_PRESETS: [(&str, Color32); 5] = [
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BloomPage {
-    Download,
+    MyDevices,
     History,
     Decrypt,
     Csc,
@@ -31,7 +29,7 @@ pub enum BloomPage {
 impl BloomPage {
     pub fn from_id(id: usize) -> Self {
         match id {
-            0 => Self::Download,
+            0 => Self::MyDevices,
             1 => Self::History,
             2 => Self::Decrypt,
             3 => Self::Csc,
@@ -42,7 +40,7 @@ impl BloomPage {
 
     pub fn id(self) -> usize {
         match self {
-            Self::Download => 0,
+            Self::MyDevices => 0,
             Self::History => 1,
             Self::Decrypt => 2,
             Self::Csc => 3,
@@ -51,31 +49,21 @@ impl BloomPage {
         }
     }
 
+    /// Exact title shared 1-to-1 between the navigation drawer and the page header.
     pub fn title(self) -> &'static str {
         match self {
-            Self::Download => "Firmware Download",
-            Self::History => "History & Changelogs",
-            Self::Decrypt => "Decrypt Firmware",
-            Self::Csc => "CSC Region Lookup",
+            Self::MyDevices => "My Devices",
+            Self::History => "History",
+            Self::Decrypt => "Decrypt",
+            Self::Csc => "CSC Regions",
             Self::Settings => "Settings",
-            Self::About => "About Bloom",
-        }
-    }
-
-    pub fn subtitle(self) -> Option<&'static str> {
-        match self {
-            Self::Download => Some("Check Samsung FUS builds, download & decrypt cleanly"),
-            Self::History => Some("Browse SmartHistory & official Samsung release changelogs"),
-            Self::Decrypt => Some("Multi-core AES-128-ECB decryption for .enc4 / .enc2 packages"),
-            Self::Csc => Some("Search Samsung Customer Software Customization region codes"),
-            Self::Settings => Some("One UI 9 theme, typography & FUS transfer preferences"),
-            Self::About => None,
+            Self::About => "About",
         }
     }
 
     pub fn icon(self) -> OneUiIcon {
         match self {
-            Self::Download => OneUiIcon::Download,
+            Self::MyDevices => OneUiIcon::Apps,
             Self::History => OneUiIcon::Calendar,
             Self::Decrypt => OneUiIcon::Shield,
             Self::Csc => OneUiIcon::Location,
@@ -105,7 +93,6 @@ pub struct AppConfig {
     pub accent_rgb: [u8; 3],
     pub typography_idx: usize,
     pub history_lang_idx: usize,
-    pub show_download_tip: bool,
 }
 
 impl Default for AppConfig {
@@ -128,7 +115,6 @@ impl Default for AppConfig {
             accent_rgb: [0x38, 0x7A, 0xFF],
             typography_idx: 0,
             history_lang_idx: 0,
-            show_download_tip: true,
         }
     }
 }
@@ -157,38 +143,26 @@ pub enum SnackAction {
 
 #[derive(Debug, Default)]
 pub struct SharedUiState {
-    pub checking: bool,
-    pub downloading: bool,
-    pub paused: bool,
     pub decrypting: bool,
     pub history_loading: bool,
-    pub latest: Option<LatestVersionInfo>,
-    pub binary: Option<BinaryFileInfo>,
-    pub resolved_fw: Option<String>,
-    pub fus_mode: Option<FusMode>,
-    pub progress: Option<ProgressSnapshot>,
+    pub device_db_syncing: bool,
+    pub device_db_error: Option<String>,
+    pub device_catalog: DeviceCatalog,
+    pub device_catalog_revision: u64,
+    pub my_device_builds_loading: bool,
+    pub my_device_builds_error: Option<String>,
+    pub my_device_builds: Option<HistoryResult>,
     pub decrypt_progress: Option<(u64, u64, u64)>,
-    pub last_outcome: Option<DownloadOutcome>,
     pub last_decrypted_path: Option<PathBuf>,
     pub history: Option<HistoryResult>,
-    pub resumable: Vec<DownloadStateFile>,
-    pub status_message: String,
     pub error_message: Option<String>,
     pub pending_toast: Option<String>,
     pub pending_snack: Option<(String, Option<&'static str>, SnackAction)>,
-    pub active_handle: Option<DownloadHandle>,
 }
 
 impl SharedUiState {
     pub fn is_busy(&self) -> bool {
-        self.checking || self.downloading || self.decrypting || self.history_loading
-    }
-
-    pub fn clear_checked(&mut self) {
-        self.latest = None;
-        self.binary = None;
-        self.resolved_fw = None;
-        self.fus_mode = None;
+        self.decrypting || self.history_loading || self.my_device_builds_loading
     }
 }
 
@@ -209,6 +183,64 @@ pub struct SelectedChangelog {
     pub item: HistoryItem,
     pub model: String,
     pub region: String,
+}
+
+/// Normalizes Samsung's OS strings (`"15"`, `"Android 16(Baklava)"`, `"U(Android 14)"`)
+/// cleanly into `"Android XX"`.
+pub fn format_android_label(raw: Option<&str>) -> String {
+    let Some(text) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "Android".to_owned();
+    };
+    if let Some(num) = extract_android_number(text) {
+        format!("Android {num}")
+    } else {
+        text.to_owned()
+    }
+}
+
+/// Extracts just the numeric version token (e.g. `"16"` from `"Android 16"`), if available.
+pub fn extract_android_number(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            return Some(&text[start..i]);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Formats build release dates cleanly (`"2026-10-08 12:34:00"` -> `"2026-10-08"`).
+pub fn format_build_date(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split_whitespace().next().unwrap_or(s).replace('/', "-"))
+        .unwrap_or_else(|| "—".to_owned())
+}
+
+pub fn format_sync_age(synced_at_unix: u64) -> String {
+    if synced_at_unix == 0 {
+        return "Not synced".to_owned();
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let diff = now.saturating_sub(synced_at_unix);
+    if diff < 60 {
+        "Synced just now".to_owned()
+    } else if diff < 3600 {
+        format!("Synced {}m ago", diff / 60)
+    } else if diff < 86_400 {
+        format!("Synced {}h ago", diff / 3600)
+    } else {
+        format!("Synced {}d ago", diff / 86_400)
+    }
 }
 
 pub fn derive_decrypted_output(input: &str) -> String {
@@ -256,17 +288,6 @@ pub fn format_eta(remaining_bytes: u64, bps: u64) -> String {
     }
 }
 
-pub fn resume_progress(state: &DownloadStateFile) -> (u64, u64, f32) {
-    let downloaded: u64 = state.segments.iter().map(|s| s.downloaded).sum();
-    let total = state.total_size;
-    let frac = if total > 0 {
-        (downloaded as f64 / total as f64).clamp(0.0, 1.0) as f32
-    } else {
-        0.0
-    };
-    (downloaded.min(total), total, frac)
-}
-
 pub fn open_folder_in_os(path: &Path) -> std::io::Result<()> {
     let target = if path.is_file() {
         path.parent().unwrap_or(path)
@@ -288,5 +309,21 @@ pub fn open_folder_in_os(path: &Path) -> std::io::Result<()> {
     {
         std::process::Command::new("xdg-open").arg(target).spawn()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_android_versions() {
+        assert_eq!(format_android_label(Some("16")), "Android 16");
+        assert_eq!(
+            format_android_label(Some("Android 15(VanillaIceCream)")),
+            "Android 15"
+        );
+        assert_eq!(format_android_label(Some("U(Android 14)")), "Android 14");
+        assert_eq!(format_android_label(None), "Android");
     }
 }

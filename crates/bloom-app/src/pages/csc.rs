@@ -39,7 +39,7 @@ impl BloomApp {
         ui.add_space(10.0);
         let has_q = !self.csc_query.is_empty();
         let (search_resp, clear_clicked) = OneUiSearchBar::new(&mut self.csc_query)
-            .hint("Search CSC code (XID, EUX), country code, or carrier...")
+            .hint("Search region (Indonesia, Europe), CSC (XID), or carrier...")
             .show_back_button(has_q)
             .floating(true)
             .show(ui);
@@ -105,19 +105,11 @@ impl BloomApp {
                 CardSection::new().show(ui, |ui| {
                     for (row_idx, item) in matches.iter().enumerate() {
                         let is_active = active_csc == item.code;
-                        let countries = if item.countries.is_empty() {
-                            "—".to_owned()
-                        } else {
-                            item.countries.join(", ")
-                        };
-                        let carriers = if item.carriers.is_empty() {
-                            "Open Market".to_owned()
-                        } else {
-                            item.carriers.join(", ")
-                        };
-                        let summary = format!("{countries} • {carriers}");
+                        let summary = item
+                            .carrier_summary()
+                            .unwrap_or_else(|| "Open Market".to_owned());
 
-                        let mut card_item = CardItem::new(&item.code)
+                        let mut card_item = CardItem::new(item.region_label())
                             .icon(OneUiIcon::Location)
                             .icon_tint(if is_active { p.primary } else { p.text_muted })
                             .summary(summary)
@@ -147,11 +139,12 @@ impl BloomApp {
 
         if let Some(code) = chosen_csc {
             self.config.csc = code.clone();
-            if let Ok(mut g) = self.shared.lock() {
-                g.clear_checked();
-            }
-            self.toast
-                .show_message(ui.ctx(), format!("Target CSC set to {code}"), 2.0);
+            let msg = self
+                .csc_db
+                .find_exact(&code)
+                .map(|c| format!("Region set to {}", c.region_label()))
+                .unwrap_or_else(|| format!("Target CSC set to {code}"));
+            self.toast.show_message(ui.ctx(), msg, 2.0);
         }
 
         let rail_top = view_rect.top() + 68.0;

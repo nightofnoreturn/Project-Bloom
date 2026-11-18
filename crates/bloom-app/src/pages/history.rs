@@ -1,7 +1,7 @@
 use egui::{vec2, Align, Frame, Layout, Margin, RichText, Ui};
 use egui_oneui::prelude::*;
 
-use crate::state::SelectedChangelog;
+use crate::state::{format_android_label, SelectedChangelog};
 use crate::widgets::{model_csc_inputs, pill_tag, status_banner};
 use crate::BloomApp;
 
@@ -98,16 +98,28 @@ impl BloomApp {
         }
 
         let Some(ref res) = history_opt else {
-            ui.add_space(14.0);
-            status_banner(
-                ui,
-                OneUiIcon::Calendar,
-                p.primary_high,
-                "No History Loaded Yet",
-                Some(
-                    "Tap 'Fetch History' to inspect available firmware builds & official changelogs.",
-                ),
-            );
+            ui.add_space(24.0);
+            if history_loading {
+                ui.vertical_centered(|ui| {
+                    ui.add(OneUiSpinner::indeterminate(SpinnerSize::Large));
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new("Fetching firmware history...")
+                            .font(font_id(ui, 14.5, OneUiFontWeight::Medium))
+                            .color(p.text_muted),
+                    );
+                });
+            } else {
+                status_banner(
+                    ui,
+                    OneUiIcon::Calendar,
+                    p.primary_high,
+                    "No History Loaded Yet",
+                    Some(
+                        "Tap 'Fetch History' to inspect available firmware builds & official changelogs.",
+                    ),
+                );
+            }
             return;
         };
 
@@ -190,7 +202,7 @@ impl BloomApp {
                             if let Some(ref os) = item.android_version {
                                 pill_tag(
                                     ui,
-                                    &format!("Android {os}"),
+                                    &format_android_label(Some(os)),
                                     p.selected_bg,
                                     p.primary_high,
                                 );
@@ -244,14 +256,14 @@ impl BloomApp {
                             ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
                             if ui
                                 .add(
-                                    OneUiButton::primary("Load in Downloader")
-                                        .icon(OneUiIcon::Download)
+                                    OneUiButton::primary("Use in Decrypt")
+                                        .icon(OneUiIcon::Shield)
                                         .enabled(!is_busy)
-                                        .min_size(vec2(150.0, 34.0)),
+                                        .min_size(vec2(142.0, 34.0)),
                                 )
                                 .clicked()
                             {
-                                self.load_build_into_downloader(
+                                self.load_build_into_decrypt(
                                     res.model.clone(),
                                     res.region.clone(),
                                     item.firmware.clone(),
@@ -338,7 +350,7 @@ impl BloomApp {
                             if let Some(ref os) = cl.android_ver {
                                 pill_tag(
                                     ui,
-                                    &format!("Android {os}"),
+                                    &format_android_label(Some(os)),
                                     p.selected_bg,
                                     p.primary_high,
                                 );

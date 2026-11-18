@@ -9,22 +9,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bloom_core::{ChangelogLang, CscDb, DownloadStateFile, ImeiDb};
+use bloom_core::{
+    default_device_cache_path, load_galaxy_cache, ChangelogLang, CscDb, CscItem, DeviceCatalog,
+    GalaxyDevice, HistoryItem, ImeiDb,
+};
 use egui::{vec2, Frame, Id, Margin, RichText};
 use egui_oneui::prelude::*;
 
 use state::{
-    open_folder_in_os, AppConfig, BloomPage, DecryptForm, SelectedChangelog, SharedUiState,
+    format_android_label, AppConfig, BloomPage, DecryptForm, SelectedChangelog, SharedUiState,
     SnackAction, STORAGE_KEY,
 };
-use tasks::{
-    refresh_resumable, spawn_check_latest, spawn_download, spawn_fetch_history,
-    spawn_manual_decrypt,
-};
+use tasks::{spawn_fetch_history, spawn_manual_decrypt, spawn_sync_galaxy_db};
 use widgets::pill_tag;
 
 static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
-pub(crate) static FIRST_FRAME_DONE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(windows)]
 mod win_crash {
@@ -52,21 +51,7 @@ mod win_crash {
         fn SetUnhandledExceptionFilter(
             filter: Option<UnhandledExceptionFilter>,
         ) -> Option<UnhandledExceptionFilter>;
-        fn AddVectoredExceptionHandler(
-            first: u32,
-            handler: Option<UnhandledExceptionFilter>,
-        ) -> *mut c_void;
         fn SetThreadStackGuarantee(stack_size_in_bytes: *mut u32) -> i32;
-    }
-
-    extern "C" {
-        fn signal(sig: i32, handler: extern "C" fn(i32)) -> *const c_void;
-        fn atexit(func: extern "C" fn()) -> i32;
-    }
-
-    fn write_crash_line(msg: &str) {
-        let _ = std::fs::write(std::env::temp_dir().join("bloom-crash.log"), msg);
-        super::log_startup_stage(msg);
     }
 
     fn extract_code_addr(info: *const ExceptionPointers) -> (u32, usize) {
@@ -88,87 +73,17 @@ mod win_crash {
         let _ = write!(cur, "Windows unhandled exception 0x{code:08X} at 0x{addr:016X}");
         let len = cur.position() as usize;
         if let Ok(msg) = std::str::from_utf8(&buf[..len]) {
-            write_crash_line(msg);
+            let _ = std::fs::write(std::env::temp_dir().join("bloom-crash.log"), msg);
         }
         0
-    }
-
-    unsafe extern "system" fn veh_handler(info: *const ExceptionPointers) -> i32 {
-        let (code, addr) = extract_code_addr(info);
-        if matches!(
-            code,
-            0xC000_0005
-                | 0xC000_0006
-                | 0xC000_001D
-                | 0xC000_008C
-                | 0xC000_0094
-                | 0xC000_0096
-                | 0xC000_00FD
-                | 0xC000_0374
-                | 0xC000_0409
-        ) {
-            let mut buf = [0u8; 96];
-            let mut cur = std::io::Cursor::new(&mut buf[..]);
-            let _ = write!(cur, "Windows VEH fatal exception 0x{code:08X} at 0x{addr:016X}");
-            let len = cur.position() as usize;
-            if let Ok(msg) = std::str::from_utf8(&buf[..len]) {
-                write_crash_line(msg);
-            }
-        }
-        0
-    }
-
-    extern "C" fn abort_handler(sig: i32) {
-        let mut buf = [0u8; 48];
-        let mut cur = std::io::Cursor::new(&mut buf[..]);
-        let _ = write!(cur, "Process received signal {sig}");
-        let len = cur.position() as usize;
-        if let Ok(msg) = std::str::from_utf8(&buf[..len]) {
-            write_crash_line(msg);
-        }
-    }
-
-    extern "C" fn on_atexit() {
-        if !super::FIRST_FRAME_DONE.load(std::sync::atomic::Ordering::Relaxed) {
-            write_crash_line("CRT atexit triggered before Frame 1 finished");
-        }
     }
 
     pub(crate) fn install() {
         unsafe {
             let mut guarantee: u32 = 65_536;
             let _ = SetThreadStackGuarantee(&mut guarantee);
-            let _ = AddVectoredExceptionHandler(1, Some(veh_handler));
-            let _ = SetUnhandledExceptionFilter(Some(exception_filter));
-            let _ = signal(22, abort_handler);
-            let _ = atexit(on_atexit);
-        }
-    }
-
-    pub(crate) fn refresh_filter() {
-        unsafe {
-            let mut guarantee: u32 = 65_536;
-            let _ = SetThreadStackGuarantee(&mut guarantee);
             let _ = SetUnhandledExceptionFilter(Some(exception_filter));
         }
-    }
-}
-
-fn write_startup_stage(stage: &str) {
-    let path = std::env::temp_dir().join("bloom-startup.log");
-    let _ = std::fs::write(path, format!("{stage}\n"));
-}
-
-pub(crate) fn log_startup_stage(stage: &str) {
-    let path = std::env::temp_dir().join("bloom-startup.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        use std::io::Write as _;
-        let _ = writeln!(f, "{stage}");
-        let _ = f.flush();
     }
 }
 
@@ -177,15 +92,6 @@ fn report_fatal(title: &str, details: &str) {
     let temp_log = std::env::temp_dir().join("bloom-crash.log");
     if std::fs::write(&temp_log, details).is_ok() {
         saved_paths.push(temp_log.display().to_string());
-    }
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
-    {
-        let local_log = dir.join("bloom-crash.log");
-        if std::fs::write(&local_log, details).is_ok() {
-            saved_paths.push(local_log.display().to_string());
-        }
     }
     eprintln!("{title}:\n{details}");
 
@@ -230,7 +136,6 @@ fn install_panic_hook() {
 
 fn main() -> eframe::Result {
     install_panic_hook();
-    write_startup_stage("1. main entered");
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -241,14 +146,10 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    log_startup_stage("2. starting eframe::run_native");
     if let Err(err) = eframe::run_native(
         "Bloom",
         native_options,
-        Box::new(|cc| {
-            log_startup_stage("3. eframe creating BloomApp");
-            Ok(Box::new(BloomApp::new(cc)))
-        }),
+        Box::new(|cc| Ok(Box::new(BloomApp::new(cc)))),
     ) {
         report_fatal("Project Bloom — Startup Failed", &format!("{err}"));
         return Err(err);
@@ -264,16 +165,33 @@ pub struct BloomApp {
     pub csc_db: CscDb,
     pub config: AppConfig,
     pub decrypt_form: DecryptForm,
+
+    // My Devices view & cached search state
+    pub device_search_query: String,
+    pub device_search_cached_query: String,
+    pub device_search_cached_rev: u64,
+    pub device_search_cached_indices: Vec<usize>,
+    pub device_search_cached_total: usize,
+    pub selected_my_device: Option<GalaxyDevice>,
+    pub selected_my_region: Option<CscItem>,
+    pub region_sheet_open: bool,
+    pub region_sheet_device: Option<GalaxyDevice>,
+    pub region_sheet_query: String,
+    pub selected_grid_build: Option<HistoryItem>,
+    pub build_detail_sheet_open: bool,
+
+    // Other pages state
     pub csc_query: String,
     pub csc_quick_filter: Option<&'static str>,
     pub csc_active_letter: Option<char>,
     pub history_filter: String,
     pub history_tab_idx: usize,
-    pub edit_output_path_inline: bool,
     pub edit_decrypt_paths_inline: bool,
     pub selected_changelog: Option<SelectedChangelog>,
     pub changelog_sheet_open: bool,
     pub licenses_sheet_open: bool,
+
+    // Navigation & global overlays
     pub page_id: usize,
     pub drawer_open: bool,
     pub color_dialog_open: bool,
@@ -282,7 +200,6 @@ pub struct BloomApp {
     pub toast: OneUiToastState,
     pub snackbar: OneUiSnackBarState,
     pub active_snack_action: Option<SnackAction>,
-    pub first_frame_logged: bool,
 }
 
 impl BloomApp {
@@ -308,8 +225,22 @@ impl BloomApp {
         let rt = Arc::new(
             tokio::runtime::Runtime::new().expect("failed to initialize Tokio runtime"),
         );
-        let shared = Arc::new(Mutex::new(SharedUiState::default()));
-        refresh_resumable(&shared, &config.output_dir);
+
+        let mut initial_state = SharedUiState::default();
+        let cache_path = default_device_cache_path();
+        let needs_initial_sync = match load_galaxy_cache(&cache_path) {
+            Some(cache) => {
+                initial_state.device_catalog = DeviceCatalog::from_cache(&cache);
+                initial_state.device_catalog_revision = 1;
+                false
+            }
+            None => true,
+        };
+        let shared = Arc::new(Mutex::new(initial_state));
+
+        if needs_initial_sync {
+            spawn_sync_galaxy_db(&rt, Arc::clone(&shared), cc.egui_ctx.clone(), false);
+        }
 
         let decrypt_form = DecryptForm {
             model: config.model.clone(),
@@ -326,17 +257,31 @@ impl BloomApp {
             csc_db: CscDb::load_embedded(),
             config,
             decrypt_form,
+
+            device_search_query: String::new(),
+            device_search_cached_query: String::new(),
+            device_search_cached_rev: 0,
+            device_search_cached_indices: Vec::new(),
+            device_search_cached_total: 0,
+            selected_my_device: None,
+            selected_my_region: None,
+            region_sheet_open: false,
+            region_sheet_device: None,
+            region_sheet_query: String::new(),
+            selected_grid_build: None,
+            build_detail_sheet_open: false,
+
             csc_query: String::new(),
             csc_quick_filter: None,
             csc_active_letter: None,
             history_filter: String::new(),
             history_tab_idx: 0,
-            edit_output_path_inline: false,
             edit_decrypt_paths_inline: false,
             selected_changelog: None,
             changelog_sheet_open: false,
             licenses_sheet_open: false,
-            page_id: BloomPage::Download.id(),
+
+            page_id: BloomPage::MyDevices.id(),
             drawer_open: true,
             color_dialog_open: false,
             color_dialog_draft: color_draft,
@@ -344,12 +289,10 @@ impl BloomApp {
             toast: OneUiToastState::default(),
             snackbar: OneUiSnackBarState::default(),
             active_snack_action: None,
-            first_frame_logged: false,
         };
 
         app.sync_theme(&cc.egui_ctx);
         app.apply_typography(&cc.egui_ctx);
-        log_startup_stage("4. BloomApp::new complete");
         app
     }
 
@@ -375,65 +318,6 @@ impl BloomApp {
             1 => install_typography(ctx, OneUiTypography::stock_roboto()),
             2 => install_typography(ctx, OneUiTypography::rounded_wide()),
             _ => reset_default_fonts(ctx),
-        }
-    }
-
-    pub fn refresh_resumable(&self) {
-        refresh_resumable(&self.shared, &self.config.output_dir);
-    }
-
-    pub fn trigger_check(&self, ctx: &egui::Context) {
-        spawn_check_latest(
-            &self.rt,
-            Arc::clone(&self.shared),
-            Arc::clone(&self.imei_db),
-            ctx.clone(),
-            self.config.clone(),
-        );
-    }
-
-    pub fn trigger_download(&self, ctx: &egui::Context, fw_override: Option<String>) {
-        spawn_download(
-            &self.rt,
-            Arc::clone(&self.shared),
-            Arc::clone(&self.imei_db),
-            ctx.clone(),
-            self.config.clone(),
-            fw_override,
-        );
-    }
-
-    pub fn trigger_resume(&mut self, ctx: &egui::Context, state: DownloadStateFile) {
-        self.config.model = state.model;
-        self.config.csc = state.region;
-        self.config.manual_fw = state.fw.clone();
-        self.config.auto_fw = false;
-        if let Ok(mut g) = self.shared.lock() {
-            g.clear_checked();
-            g.error_message = None;
-        }
-        self.trigger_download(ctx, Some(state.fw));
-    }
-
-    pub fn pause_download(&self) {
-        if let Some(handle) = self
-            .shared
-            .lock()
-            .ok()
-            .and_then(|g| g.active_handle.clone())
-        {
-            handle.pause();
-        }
-    }
-
-    pub fn cancel_download(&self) {
-        if let Some(handle) = self
-            .shared
-            .lock()
-            .ok()
-            .and_then(|g| g.active_handle.clone())
-        {
-            handle.cancel();
         }
     }
 
@@ -464,25 +348,20 @@ impl BloomApp {
         );
     }
 
-    pub fn load_build_into_downloader(
+    pub fn load_build_into_decrypt(
         &mut self,
         model: String,
         region: String,
         fw: String,
         ctx: &egui::Context,
     ) {
-        self.config.model = model;
-        self.config.csc = region;
-        self.config.manual_fw = fw.clone();
-        self.config.auto_fw = false;
-        if let Ok(mut g) = self.shared.lock() {
-            g.clear_checked();
-            g.error_message = None;
-            g.status_message = format!("Loaded build {fw} into downloader.");
-        }
-        self.page_id = BloomPage::Download.id();
+        self.decrypt_form.model = model;
+        self.decrypt_form.csc = region;
+        self.decrypt_form.fw = fw.clone();
+        self.decrypt_form.use_manual_key = false;
+        self.page_id = BloomPage::Decrypt.id();
         self.toast
-            .show_message(ctx, format!("Loaded {fw} into Download"), 2.4);
+            .show_message(ctx, format!("Loaded {fw} into Decrypt"), 2.2);
     }
 
     fn show_snackbar_with_action(
@@ -528,7 +407,7 @@ impl BloomApp {
                     if let Some(ref os) = selected.item.android_version {
                         pill_tag(
                             ui,
-                            &format!("Android {os}"),
+                            &format_android_label(Some(os)),
                             p.tone_on_tone,
                             p.text_primary,
                         );
@@ -587,8 +466,8 @@ impl BloomApp {
                     ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
                     if ui
                         .add(
-                            OneUiButton::contained_primary("Load in Downloader")
-                                .icon(OneUiIcon::Download)
+                            OneUiButton::contained_primary("Use in Decrypt")
+                                .icon(OneUiIcon::Shield)
                                 .enabled(!is_busy),
                         )
                         .clicked()
@@ -608,7 +487,7 @@ impl BloomApp {
 
         if load_clicked {
             self.changelog_sheet_open = false;
-            self.load_build_into_downloader(
+            self.load_build_into_decrypt(
                 selected.model,
                 selected.region,
                 selected.item.firmware,
@@ -625,22 +504,13 @@ impl BloomApp {
                 CardSection::new()
                     .fill(theme.palette.surface_container)
                     .show(ui, |ui| {
-                        ui.add(CardItem::new("bloom-core").summary("Samsung FUS Modern/Legacy protocol, SmartHistory & resumable HTTP Range engine"));
-                        ui.add(CardItem::new("OneUI-Crate (egui-oneui)").summary("Samsung One UI 9 (SESL9) tokens, floating drawers, 3-phase AppBar & widgets").top_divider(true));
+                        ui.add(CardItem::new("bloom-core").summary("Samsung FUS Modern/Legacy protocol, SmartHistory, Galaxy catalog & parallel AES decrypt"));
+                        ui.add(CardItem::new("OneUI-Crate (egui-oneui v0.1.2)").summary("Samsung One UI 9 (SESL9) tokens, floating drawers, AppBar scaffold & widgets").top_divider(true));
                         ui.add(CardItem::new("emilk/egui & eframe 0.37.0").summary("MIT / Apache-2.0 — Immediate-mode Rust GUI framework").top_divider(true));
                         ui.add(CardItem::new("resvg 0.50.0 & Roboto Flex").summary("MPL-2.0 / SIL OFL 1.1 — HiDPI One UI SVG icons & variable font").top_divider(true));
                     });
             },
         );
-    }
-}
-
-impl Drop for BloomApp {
-    fn drop(&mut self) {
-        if !FIRST_FRAME_DONE.load(Ordering::Relaxed) {
-            log_startup_stage("BloomApp::drop before Frame 1 finished");
-        }
-        self.pause_download();
     }
 }
 
@@ -650,12 +520,6 @@ impl eframe::App for BloomApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let log_frame = !self.first_frame_logged;
-        if log_frame {
-            #[cfg(windows)]
-            win_crash::refresh_filter();
-            log_startup_stage("5. First ui() frame entered");
-        }
         let pending_snack = if let Ok(mut g) = self.shared.lock() {
             if let Some(msg) = g.pending_toast.take() {
                 self.toast.show_message(ui.ctx(), msg, 2.8);
@@ -679,73 +543,52 @@ impl eframe::App for BloomApp {
         }
 
         let theme = theme_from_ui(ui);
-        if log_frame {
-            log_startup_stage("5.1 apply_borderless_window_resize");
-        }
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (is_busy, is_checking, is_downloading, is_paused, has_resumable, csc_hint) =
-            match self.shared.lock() {
-                Ok(g) => (
-                    g.is_busy(),
-                    g.checking,
-                    g.downloading,
-                    g.paused,
-                    !g.resumable.is_empty(),
-                    self.config.csc.trim().to_ascii_uppercase(),
-                ),
-                Err(_) => (false, false, false, false, false, String::new()),
-            };
+        let (is_busy, db_syncing, csc_hint) = match self.shared.lock() {
+            Ok(g) => (
+                g.is_busy(),
+                g.device_db_syncing,
+                self.config.csc.trim().to_ascii_uppercase(),
+            ),
+            Err(_) => (false, false, String::new()),
+        };
 
-        if is_busy {
+        if is_busy || db_syncing {
             ui.ctx()
                 .request_repaint_after(Duration::from_millis(120));
         }
 
-        let dl_entry = if is_downloading {
-            DrawerEntry::with_badge(
-                BloomPage::Download.id(),
-                "Download",
-                BloomPage::Download.icon(),
-                "RUN",
-            )
-        } else if has_resumable {
-            DrawerEntry::with_badge(
-                BloomPage::Download.id(),
-                "Download",
-                BloomPage::Download.icon(),
-                "R",
-            )
-        } else {
-            DrawerEntry::item(
-                BloomPage::Download.id(),
-                "Download",
-                BloomPage::Download.icon(),
-            )
-        };
-
         let csc_entry = if !csc_hint.is_empty() && csc_hint.len() <= 4 {
             DrawerEntry::with_badge(
                 BloomPage::Csc.id(),
-                "CSC Regions",
+                BloomPage::Csc.title(),
                 BloomPage::Csc.icon(),
                 &csc_hint,
             )
         } else {
-            DrawerEntry::item(BloomPage::Csc.id(), "CSC Regions", BloomPage::Csc.icon())
+            DrawerEntry::item(
+                BloomPage::Csc.id(),
+                BloomPage::Csc.title(),
+                BloomPage::Csc.icon(),
+            )
         };
 
         let entries = [
             DrawerEntry::SectionLabel("FIRMWARE"),
-            dl_entry,
+            DrawerEntry::item(
+                BloomPage::MyDevices.id(),
+                BloomPage::MyDevices.title(),
+                BloomPage::MyDevices.icon(),
+            ),
             DrawerEntry::item(
                 BloomPage::History.id(),
-                "History & Changelogs",
+                BloomPage::History.title(),
                 BloomPage::History.icon(),
             ),
             DrawerEntry::item(
                 BloomPage::Decrypt.id(),
-                "Decrypt",
+                BloomPage::Decrypt.title(),
                 BloomPage::Decrypt.icon(),
             ),
             DrawerEntry::DottedDivider,
@@ -753,30 +596,24 @@ impl eframe::App for BloomApp {
             csc_entry,
             DrawerEntry::item(
                 BloomPage::Settings.id(),
-                "Settings",
+                BloomPage::Settings.title(),
                 BloomPage::Settings.icon(),
             ),
-            DrawerEntry::item(BloomPage::About.id(), "About Bloom", BloomPage::About.icon()),
+            DrawerEntry::item(
+                BloomPage::About.id(),
+                BloomPage::About.title(),
+                BloomPage::About.icon(),
+            ),
         ];
 
-        if log_frame {
-            log_startup_stage("5.2 OneUiDrawer::show");
-        }
-        let (_nav_changed, settings_clicked) =
-            OneUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
-                ui,
-                &mut self.drawer_open,
-                Some((OneUiIcon::Settings, "Open Settings")),
-            );
-        if settings_clicked {
-            self.page_id = BloomPage::Settings.id();
-        }
-        if log_frame {
-            log_startup_stage("5.3 CentralPanel + OneUiScaffold");
-        }
+        OneUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
+            ui,
+            &mut self.drawer_open,
+            None,
+        );
 
         let current_page = BloomPage::from_id(self.page_id);
-        let has_floating_bar = matches!(current_page, BloomPage::Download | BloomPage::Decrypt);
+        let has_floating_bar = current_page == BloomPage::Decrypt;
         self.snackbar
             .set_bottom_offset(if has_floating_bar { 88.0 } else { 24.0 });
 
@@ -784,50 +621,15 @@ impl eframe::App for BloomApp {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ui, |ui| {
-                let mut open_about = false;
-                let mut toggle_dark = false;
-                let is_dark = self.config.dark_mode;
-
                 let scaffold_resp = OneUiScaffold::new("bloom_scaffold", current_page.title())
-                    .subtitle(current_page.subtitle())
                     .nav_button(ScaffoldNavButton::DrawerMenu)
                     .window_controls(true)
                     .show(
                         ui,
-                        |toolbar_ui| {
-                            if toolbar_ui
-                                .add(
-                                    OneUiIconButton::new(OneUiIcon::Info)
-                                        .size(40.0)
-                                        .icon_size(20.0)
-                                        .tooltip("About Project Bloom"),
-                                )
-                                .clicked()
-                            {
-                                open_about = true;
-                            }
-                            if toolbar_ui
-                                .add(
-                                    OneUiIconButton::new(if is_dark {
-                                        OneUiIcon::Sun
-                                    } else {
-                                        OneUiIcon::Moon
-                                    })
-                                    .size(40.0)
-                                    .icon_size(20.0)
-                                    .tooltip("Toggle Light / Dark mode"),
-                                )
-                                .clicked()
-                            {
-                                toggle_dark = true;
-                            }
-                        },
+                        |_toolbar_ui| {},
                         |ui| {
-                            if log_frame {
-                                log_startup_stage("5.3a OneUiScaffold body start");
-                            }
                             match current_page {
-                                BloomPage::Download => self.render_download_page(ui),
+                                BloomPage::MyDevices => self.render_my_devices_page(ui),
                                 BloomPage::History => self.render_history_page(ui),
                                 BloomPage::Decrypt => self.render_decrypt_page(ui),
                                 BloomPage::Csc => self.render_csc_page(ui),
@@ -838,70 +640,11 @@ impl eframe::App for BloomApp {
                         },
                     );
 
-                if open_about {
-                    self.page_id = BloomPage::About.id();
-                }
-                if toggle_dark {
-                    self.config.follow_system = false;
-                    self.config.dark_mode = !self.config.dark_mode;
-                    self.sync_theme(ui.ctx());
-                }
                 if scaffold_resp.nav_clicked {
                     self.drawer_open = !self.drawer_open;
                 }
 
-                if log_frame {
-                    log_startup_stage("5.4 show_bottom_floating_bar");
-                }
-                // Floating One UI 9 DividerButtonLayout capsule bar anchored cleanly at pane bottom
-                if current_page == BloomPage::Download {
-                    let mut bar_action: Option<usize> = None;
-                    show_bottom_floating_bar(
-                        ui,
-                        16.0,
-                        Id::unique("bloom_download_div_bar"),
-                        |ui| {
-                            if is_downloading {
-                                let items = [
-                                    DividerButtonItem::new("Pause"),
-                                    DividerButtonItem::new("Cancel").icon(OneUiIcon::Close),
-                                ];
-                                bar_action =
-                                    OneUiDividerButtonLayout::new("dl_active_bar", &items).show(ui);
-                            } else {
-                                let check_label = if is_checking {
-                                    "Checking..."
-                                } else {
-                                    "Check Latest"
-                                };
-                                let dl_label = if is_paused { "Resume" } else { "Download" };
-                                let items = [
-                                    DividerButtonItem::new(check_label)
-                                        .icon(OneUiIcon::Search)
-                                        .enabled(!is_busy),
-                                    DividerButtonItem::new(dl_label)
-                                        .icon(OneUiIcon::Download)
-                                        .enabled(!is_busy),
-                                ];
-                                bar_action =
-                                    OneUiDividerButtonLayout::new("dl_idle_bar", &items).show(ui);
-                            }
-                        },
-                    );
-                    if let Some(idx) = bar_action {
-                        if is_downloading {
-                            if idx == 0 {
-                                self.pause_download();
-                            } else {
-                                self.cancel_download();
-                            }
-                        } else if idx == 0 {
-                            self.trigger_check(ui.ctx());
-                        } else {
-                            self.trigger_download(ui.ctx(), None);
-                        }
-                    }
-                } else if current_page == BloomPage::Decrypt {
+                if current_page == BloomPage::Decrypt {
                     let mut dec_action: Option<usize> = None;
                     show_bottom_floating_bar(
                         ui,
@@ -930,9 +673,10 @@ impl eframe::App for BloomApp {
                 }
             });
 
-        if log_frame {
-            log_startup_stage("5.5 dialogs/sheets/overlays");
-        }
+        // My Devices region & build detail bottom sheets
+        self.render_region_picker_sheet(ui.ctx());
+        self.render_build_detail_sheet(ui.ctx());
+
         // Accent color picker dialog
         let mut draft = self.color_dialog_draft;
         let mut accent = self.config.accent_color();
@@ -954,7 +698,7 @@ impl eframe::App for BloomApp {
 
         // Reset confirmation dialog with Undo SnackBar support
         if let Some(idx) = OneUiDialog::new("bloom_reset_dialog", "Reset preferences?")
-            .body("Restores default device target, output path, transfer limits, and One UI 9 theme settings.")
+            .body("Restores default transfer limits, output folder, and One UI 9 theme settings.")
             .action(DialogAction::cancel("Cancel"))
             .action(DialogAction::destructive("Reset"))
             .show(ui.ctx(), &mut self.reset_dialog_open, |_| {})
@@ -964,7 +708,6 @@ impl eframe::App for BloomApp {
                 self.config = AppConfig::default();
                 self.sync_theme(ui.ctx());
                 self.apply_typography(ui.ctx());
-                self.refresh_resumable();
                 self.show_snackbar_with_action(
                     ui.ctx(),
                     "Preferences reset to defaults",
@@ -987,7 +730,7 @@ impl eframe::App for BloomApp {
         {
             match action {
                 SnackAction::OpenFolder(path) => {
-                    if let Err(err) = open_folder_in_os(&path) {
+                    if let Err(err) = state::open_folder_in_os(&path) {
                         self.toast.show_message(
                             ui.ctx(),
                             format!("Could not open folder: {err}"),
@@ -999,18 +742,11 @@ impl eframe::App for BloomApp {
                     self.config = *prev;
                     self.sync_theme(ui.ctx());
                     self.apply_typography(ui.ctx());
-                    self.refresh_resumable();
                     self.toast.show_message(ui.ctx(), "Preferences restored", 2.0);
                 }
             }
         }
 
         self.toast.ui(ui);
-
-        if !self.first_frame_logged {
-            self.first_frame_logged = true;
-            FIRST_FRAME_DONE.store(true, Ordering::Relaxed);
-            log_startup_stage("6. First ui() frame rendered");
-        }
     }
 }

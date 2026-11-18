@@ -1,6 +1,6 @@
 pub mod about;
 pub mod csc;
 pub mod decrypt;
-pub mod download;
 pub mod history;
+pub mod my_devices;
 pub mod settings;

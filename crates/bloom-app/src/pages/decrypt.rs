@@ -17,11 +17,10 @@ impl BloomApp {
                 g.error_message.clone(),
                 g.decrypt_progress,
                 g.last_decrypted_path.clone(),
-                g.resolved_fw.clone(),
             ),
             Err(_) => return,
         };
-        let (decrypting, error_message, decrypt_progress, last_decrypted_path, resolved_fw) = snap;
+        let (decrypting, error_message, decrypt_progress, last_decrypted_path) = snap;
         let theme = theme_from_ui(ui);
         let p = &theme.palette;
 
@@ -342,32 +341,27 @@ impl BloomApp {
         }
 
         ui.add_space(14.0);
-        let links = ["Back to Firmware Download", "History & Changelogs"];
+        let links = ["My Devices", "History"];
         if let Some(idx) = RelativeLinksCard::new(&links).show(ui) {
             self.page_id = match idx {
-                0 => BloomPage::Download.id(),
+                0 => BloomPage::MyDevices.id(),
                 _ => BloomPage::History.id(),
             };
         }
 
-        if let Some(ref fw) = resolved_fw {
-            let caption = format!("Active session build: {fw}");
-            OneUiPreferenceCaption::new(&caption).show(ui);
-        }
         ui.add_space(92.0);
     }
 
     pub fn sync_decrypt_from_download(&mut self, ctx: &egui::Context) {
-        let resolved_fw = self.shared.lock().ok().and_then(|g| g.resolved_fw.clone());
         self.decrypt_form.model = self.config.model.clone();
         self.decrypt_form.csc = self.config.csc.clone();
         self.decrypt_form.imei = self.config.imei.clone();
-        if let Some(fw) = resolved_fw {
-            self.decrypt_form.fw = fw;
+        if let Some(ref build) = self.selected_grid_build {
+            self.decrypt_form.fw = build.firmware.clone();
         } else if !self.config.manual_fw.is_empty() {
             self.decrypt_form.fw = self.config.manual_fw.clone();
         }
         self.toast
-            .show_message(ctx, "Synced Model, CSC & Firmware from Download", 2.0);
+            .show_message(ctx, "Synced Model, CSC & Firmware", 2.0);
     }
 }

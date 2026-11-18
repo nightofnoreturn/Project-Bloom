@@ -40,12 +40,189 @@ pub struct SmartBinaryInfo {
     pub open_date: Option<String>,
 }
 
+/// Map a 2-letter ISO-3166 region code used in `cscs.csv` to a human-readable country name.
+pub fn country_name(code: &str) -> &str {
+    match code.trim().to_ascii_uppercase().as_str() {
+        "AE" => "United Arab Emirates",
+        "AF" => "Afghanistan",
+        "AL" => "Albania",
+        "AM" => "Armenia",
+        "AR" => "Argentina",
+        "AT" => "Austria",
+        "AU" => "Australia",
+        "AW" => "Aruba",
+        "AZ" => "Azerbaijan",
+        "BA" => "Bosnia and Herzegovina",
+        "BD" => "Bangladesh",
+        "BE" => "Belgium",
+        "BG" => "Bulgaria",
+        "BH" => "Bahrain",
+        "BO" => "Bolivia",
+        "BR" => "Brazil",
+        "BS" => "Bahamas",
+        "BY" => "Belarus",
+        "CA" => "Canada",
+        "CH" => "Switzerland",
+        "CI" => "Ivory Coast",
+        "CL" => "Chile",
+        "CN" => "China",
+        "CO" => "Colombia",
+        "CR" => "Costa Rica",
+        "CY" => "Cyprus",
+        "CZ" => "Czechia",
+        "DE" => "Germany",
+        "DK" => "Denmark",
+        "DM" => "Dominica",
+        "DO" => "Dominican Republic",
+        "DZ" => "Algeria",
+        "EC" => "Ecuador",
+        "EE" => "Estonia",
+        "EG" => "Egypt",
+        "ES" => "Spain",
+        "FI" => "Finland",
+        "FJ" => "Fiji",
+        "FK" => "Falkland Islands",
+        "FR" => "France",
+        "GB" | "UK" => "United Kingdom",
+        "GE" => "Georgia",
+        "GF" => "French Guiana",
+        "GH" => "Ghana",
+        "GL" => "Greenland",
+        "GR" => "Greece",
+        "GT" => "Guatemala",
+        "GY" => "Guyana",
+        "HK" => "Hong Kong",
+        "HN" => "Honduras",
+        "HR" => "Croatia",
+        "HU" => "Hungary",
+        "ID" => "Indonesia",
+        "IE" => "Ireland",
+        "IL" => "Israel",
+        "IN" => "India",
+        "IQ" => "Iraq",
+        "IR" => "Iran",
+        "IS" => "Iceland",
+        "IT" => "Italy",
+        "JM" => "Jamaica",
+        "JO" => "Jordan",
+        "JP" => "Japan",
+        "KE" => "Kenya",
+        "KH" => "Cambodia",
+        "KR" => "South Korea",
+        "KW" => "Kuwait",
+        "KZ" => "Kazakhstan",
+        "LB" => "Lebanon",
+        "LI" => "Liechtenstein",
+        "LK" => "Sri Lanka",
+        "LT" => "Lithuania",
+        "LU" => "Luxembourg",
+        "LV" => "Latvia",
+        "LY" => "Libya",
+        "MA" => "Morocco",
+        "MD" => "Moldova",
+        "ME" => "Montenegro",
+        "MK" => "North Macedonia",
+        "MN" => "Mongolia",
+        "MO" => "Macau",
+        "MT" => "Malta",
+        "MU" => "Mauritius",
+        "MX" => "Mexico",
+        "MY" => "Malaysia",
+        "NG" => "Nigeria",
+        "NI" => "Nicaragua",
+        "NL" => "Netherlands",
+        "NO" => "Norway",
+        "NP" => "Nepal",
+        "NZ" => "New Zealand",
+        "OM" => "Oman",
+        "PA" => "Panama",
+        "PE" => "Peru",
+        "PG" => "Papua New Guinea",
+        "PH" => "Philippines",
+        "PK" => "Pakistan",
+        "PL" => "Poland",
+        "PR" => "Puerto Rico",
+        "PT" => "Portugal",
+        "PY" => "Paraguay",
+        "QA" => "Qatar",
+        "RO" => "Romania",
+        "RS" => "Serbia",
+        "RU" => "Russia",
+        "SA" => "Saudi Arabia",
+        "SE" => "Sweden",
+        "SG" => "Singapore",
+        "SI" => "Slovenia",
+        "SK" => "Slovakia",
+        "SN" => "Senegal",
+        "SR" => "Suriname",
+        "SV" => "El Salvador",
+        "SY" => "Syria",
+        "TH" => "Thailand",
+        "TN" => "Tunisia",
+        "TR" => "Turkey",
+        "TT" => "Trinidad and Tobago",
+        "TW" => "Taiwan",
+        "UA" => "Ukraine",
+        "US" => "United States",
+        "UY" => "Uruguay",
+        "UZ" => "Uzbekistan",
+        "VE" => "Venezuela",
+        "VN" => "Vietnam",
+        "XK" => "Kosovo",
+        "YE" => "Yemen",
+        "ZA" => "South Africa",
+        "ZM" => "Zambia",
+        _ => code.trim(),
+    }
+}
+
 /// A single Samsung Customer Software Customization (CSC) entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CscItem {
     pub code: String,
     pub countries: Vec<String>,
     pub carriers: Vec<String>,
+}
+
+impl CscItem {
+    /// Human-readable region/country name (never raw 2-letter codes alone).
+    pub fn region_name(&self) -> String {
+        match self.code.as_str() {
+            "CAU" => return "Caucasus".to_owned(),
+            "CRM" => return "Latin America".to_owned(),
+            "EUX" | "EUY" => return "Europe".to_owned(),
+            "NEE" => return "Nordic Countries".to_owned(),
+            "OLB" => return "Southeast Asia".to_owned(),
+            "OXA" => return "Western Europe".to_owned(),
+            "OXE" => return "CIS & UAE".to_owned(),
+            "OXX" => return "Multi-Europe".to_owned(),
+            "SEB" => return "Baltic States".to_owned(),
+            "SEE" => return "South East Europe".to_owned(),
+            "SWA" => return "Middle East & West Asia".to_owned(),
+            _ => {}
+        }
+
+        match self.countries.len() {
+            0 => "Global".to_owned(),
+            1 => country_name(&self.countries[0]).to_owned(),
+            2 => format!(
+                "{} & {}",
+                country_name(&self.countries[0]),
+                country_name(&self.countries[1])
+            ),
+            n => format!("{} (+{})", country_name(&self.countries[0]), n - 1),
+        }
+    }
+
+    /// Combined region label in `Country/Region (CSC)` format, e.g. `Indonesia (XID)`.
+    pub fn region_label(&self) -> String {
+        format!("{} ({})", self.region_name(), self.code)
+    }
+
+    /// Optional carrier summary string when the CSC is carrier-specific.
+    pub fn carrier_summary(&self) -> Option<String> {
+        (!self.carriers.is_empty()).then(|| self.carriers.join(", "))
+    }
 }
 
 /// Embedded database of Samsung CSC region codes (`cscs.csv`).
@@ -118,7 +295,7 @@ impl CscDb {
         self.items.iter().find(|item| item.code == upper)
     }
 
-    /// Case-insensitive search across CSC code, country code, and carrier names.
+    /// Case-insensitive search across CSC code, resolved region/country name, ISO code, and carrier names.
     pub fn search(&self, query: &str) -> Vec<&CscItem> {
         let q = query.trim().to_ascii_lowercase();
         if q.is_empty() {
@@ -128,10 +305,14 @@ impl CscDb {
             .iter()
             .filter(|item| {
                 item.code.to_ascii_lowercase().contains(&q)
+                    || item.region_label().to_ascii_lowercase().contains(&q)
                     || item
                         .countries
                         .iter()
-                        .any(|c| c.to_ascii_lowercase().contains(&q))
+                        .any(|c| {
+                            c.to_ascii_lowercase().contains(&q)
+                                || country_name(c).to_ascii_lowercase().contains(&q)
+                        })
                     || item
                         .carriers
                         .iter()
@@ -252,6 +433,13 @@ mod tests {
         assert!(db.all().len() > 400);
         let xid = db.find_exact("XID").expect("XID should exist in cscs.csv");
         assert!(xid.countries.iter().any(|c| c == "ID"));
+        assert_eq!(xid.region_label(), "Indonesia (XID)");
+
+        let eux = db.find_exact("EUX").expect("EUX should exist in cscs.csv");
+        assert_eq!(eux.region_label(), "Europe (EUX)");
+
+        let indo_matches = db.search("indonesia");
+        assert!(indo_matches.iter().any(|item| item.code == "XID"));
     }
 
     #[test]
