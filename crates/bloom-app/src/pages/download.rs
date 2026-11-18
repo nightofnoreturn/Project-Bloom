@@ -51,7 +51,11 @@ impl BloomApp {
 
         let theme = theme_from_ui(ui);
         let p = &theme.palette;
+        let log_frame = !self.first_frame_logged;
 
+        if log_frame {
+            crate::log_startup_stage("5.3b OneUiSwitchBar");
+        }
         // Top One UI 9 master SwitchBar (Auto-fetch latest vs Manual build)
         if ui
             .add_enabled(
@@ -69,6 +73,9 @@ impl BloomApp {
         ui.add_space(10.0);
 
         if self.config.show_download_tip {
+            if log_frame {
+                crate::log_startup_stage("5.3c TipsCard");
+            }
             let tip_resp = TipsCard::new(
                 "Downloads auto-recover from drops or expired Samsung 401 tokens. Pause anytime cleanly.",
             )
@@ -97,6 +104,9 @@ impl BloomApp {
 
         // Resumable partial downloads found on disk
         if !resumable.is_empty() {
+            if log_frame {
+                crate::log_startup_stage("5.3c2 Resumable");
+            }
             SectionHeader::new("Resumable Downloads Detected")
                 .top_space(4.0)
                 .show(ui);
@@ -311,6 +321,9 @@ impl BloomApp {
                 });
         }
 
+        if log_frame {
+            crate::log_startup_stage("5.3d DeviceCard");
+        }
         // Device & Firmware target card
         SectionHeader::new("Device & Firmware").show(ui);
         CardSection::new()
@@ -479,6 +492,9 @@ impl BloomApp {
                 });
         }
 
+        if log_frame {
+            crate::log_startup_stage("5.3e TransferCard");
+        }
         // Transfer & Post-Processing options card
         SectionHeader::new("Transfer & Post-Processing").show(ui);
         CardSection::new()
@@ -544,6 +560,9 @@ impl BloomApp {
                 Frame::NONE
                     .inner_margin(Margin::symmetric(20, 12))
                     .show(ui, |ui| {
+                        if log_frame {
+                            crate::log_startup_stage("5.3f SeekBarPro");
+                        }
                         ui.spacing_mut().item_spacing.y = 14.0;
                         let mut conn_f = self.config.connections.clamp(1, 32) as f32;
                         if ui
@@ -612,6 +631,9 @@ impl BloomApp {
                 .show(ui);
             });
 
+        if log_frame {
+            crate::log_startup_stage("5.3g RelativeLinksCard");
+        }
         ui.add_space(14.0);
         let links = [
             "Firmware History & Changelogs",

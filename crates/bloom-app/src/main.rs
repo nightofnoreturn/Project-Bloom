@@ -27,7 +27,20 @@ static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
 
 fn write_startup_stage(stage: &str) {
     let path = std::env::temp_dir().join("bloom-startup.log");
-    let _ = std::fs::write(path, stage);
+    let _ = std::fs::write(path, format!("{stage}\n"));
+}
+
+pub(crate) fn log_startup_stage(stage: &str) {
+    let path = std::env::temp_dir().join("bloom-startup.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = writeln!(f, "{stage}");
+        let _ = f.flush();
+    }
 }
 
 fn report_fatal(title: &str, details: &str) {
@@ -76,8 +89,10 @@ fn install_panic_hook() {
             || "unknown location".to_owned(),
             |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
         );
+        let base_msg = format!("Panic at {loc}:\n{payload}");
+        let _ = std::fs::write(std::env::temp_dir().join("bloom-crash.log"), &base_msg);
         let bt = std::backtrace::Backtrace::force_capture();
-        let details = format!("Panic at {loc}:\n{payload}\n\nBacktrace:\n{bt}");
+        let details = format!("{base_msg}\n\nBacktrace:\n{bt}");
         report_fatal("Project Bloom — Fatal Error", &details);
     }));
 }
@@ -95,12 +110,12 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    write_startup_stage("2. starting eframe::run_native");
+    log_startup_stage("2. starting eframe::run_native");
     if let Err(err) = eframe::run_native(
         "Bloom",
         native_options,
         Box::new(|cc| {
-            write_startup_stage("3. eframe creating BloomApp");
+            log_startup_stage("3. eframe creating BloomApp");
             Ok(Box::new(BloomApp::new(cc)))
         }),
     ) {
@@ -203,7 +218,7 @@ impl BloomApp {
 
         app.sync_theme(&cc.egui_ctx);
         app.apply_typography(&cc.egui_ctx);
-        write_startup_stage("4. BloomApp::new complete");
+        log_startup_stage("4. BloomApp::new complete");
         app
     }
 
@@ -501,8 +516,9 @@ impl eframe::App for BloomApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if !self.first_frame_logged {
-            write_startup_stage("5. First ui() frame entered");
+        let log_frame = !self.first_frame_logged;
+        if log_frame {
+            log_startup_stage("5. First ui() frame entered");
         }
         let pending_snack = if let Ok(mut g) = self.shared.lock() {
             if let Some(msg) = g.pending_toast.take() {
@@ -527,6 +543,9 @@ impl eframe::App for BloomApp {
         }
 
         let theme = theme_from_ui(ui);
+        if log_frame {
+            log_startup_stage("5.1 apply_borderless_window_resize");
+        }
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
         let (is_busy, is_checking, is_downloading, is_paused, has_resumable, csc_hint) =
@@ -604,6 +623,9 @@ impl eframe::App for BloomApp {
             DrawerEntry::item(BloomPage::About.id(), "About Bloom", BloomPage::About.icon()),
         ];
 
+        if log_frame {
+            log_startup_stage("5.2 OneUiDrawer::show");
+        }
         let (_nav_changed, settings_clicked) =
             OneUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
                 ui,
@@ -612,6 +634,9 @@ impl eframe::App for BloomApp {
             );
         if settings_clicked {
             self.page_id = BloomPage::Settings.id();
+        }
+        if log_frame {
+            log_startup_stage("5.3 CentralPanel + OneUiScaffold");
         }
 
         let current_page = BloomPage::from_id(self.page_id);
@@ -662,6 +687,9 @@ impl eframe::App for BloomApp {
                             }
                         },
                         |ui| {
+                            if log_frame {
+                                log_startup_stage("5.3a OneUiScaffold body start");
+                            }
                             match current_page {
                                 BloomPage::Download => self.render_download_page(ui),
                                 BloomPage::History => self.render_history_page(ui),
@@ -686,6 +714,9 @@ impl eframe::App for BloomApp {
                     self.drawer_open = !self.drawer_open;
                 }
 
+                if log_frame {
+                    log_startup_stage("5.4 show_bottom_floating_bar");
+                }
                 // Floating One UI 9 DividerButtonLayout capsule bar anchored cleanly at pane bottom
                 if current_page == BloomPage::Download {
                     let mut bar_action: Option<usize> = None;
@@ -763,6 +794,9 @@ impl eframe::App for BloomApp {
                 }
             });
 
+        if log_frame {
+            log_startup_stage("5.5 dialogs/sheets/overlays");
+        }
         // Accent color picker dialog
         let mut draft = self.color_dialog_draft;
         let mut accent = self.config.accent_color();
@@ -839,7 +873,7 @@ impl eframe::App for BloomApp {
 
         if !self.first_frame_logged {
             self.first_frame_logged = true;
-            write_startup_stage("6. First ui() frame rendered");
+            log_startup_stage("6. First ui() frame rendered");
         }
     }
 }
