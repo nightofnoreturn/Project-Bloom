@@ -5,6 +5,7 @@ mod state;
 mod tasks;
 mod widgets;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,7 +23,69 @@ use tasks::{
 };
 use widgets::pill_tag;
 
+static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
+
+fn write_startup_stage(stage: &str) {
+    let path = std::env::temp_dir().join("bloom-startup.log");
+    let _ = std::fs::write(path, stage);
+}
+
+fn report_fatal(title: &str, details: &str) {
+    let mut saved_paths = Vec::new();
+    let temp_log = std::env::temp_dir().join("bloom-crash.log");
+    if std::fs::write(&temp_log, details).is_ok() {
+        saved_paths.push(temp_log.display().to_string());
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+    {
+        let local_log = dir.join("bloom-crash.log");
+        if std::fs::write(&local_log, details).is_ok() {
+            saved_paths.push(local_log.display().to_string());
+        }
+    }
+    eprintln!("{title}:\n{details}");
+
+    if !FATAL_SHOWN.swap(true, Ordering::SeqCst) {
+        let preview: String = details.chars().take(900).collect();
+        let body = if saved_paths.is_empty() {
+            preview
+        } else {
+            format!("{preview}\n\nLog:\n{}", saved_paths.join("\n"))
+        };
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title(title)
+            .set_description(&body)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
+}
+
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_owned()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic".to_owned()
+        };
+        let loc = info.location().map_or_else(
+            || "unknown location".to_owned(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
+        let bt = std::backtrace::Backtrace::force_capture();
+        let details = format!("Panic at {loc}:\n{payload}\n\nBacktrace:\n{bt}");
+        report_fatal("Project Bloom — Fatal Error", &details);
+    }));
+}
+
 fn main() -> eframe::Result {
+    install_panic_hook();
+    write_startup_stage("1. main entered");
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Project Bloom")
@@ -32,11 +95,20 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native(
+    write_startup_stage("2. starting eframe::run_native");
+    if let Err(err) = eframe::run_native(
         "Bloom",
         native_options,
-        Box::new(|cc| Ok(Box::new(BloomApp::new(cc)))),
-    )
+        Box::new(|cc| {
+            write_startup_stage("3. eframe creating BloomApp");
+            Ok(Box::new(BloomApp::new(cc)))
+        }),
+    ) {
+        report_fatal("Project Bloom — Startup Failed", &format!("{err}"));
+        return Err(err);
+    }
+
+    Ok(())
 }
 
 pub struct BloomApp {
@@ -64,6 +136,7 @@ pub struct BloomApp {
     pub toast: OneUiToastState,
     pub snackbar: OneUiSnackBarState,
     pub active_snack_action: Option<SnackAction>,
+    pub first_frame_logged: bool,
 }
 
 impl BloomApp {
@@ -125,10 +198,12 @@ impl BloomApp {
             toast: OneUiToastState::default(),
             snackbar: OneUiSnackBarState::default(),
             active_snack_action: None,
+            first_frame_logged: false,
         };
 
         app.sync_theme(&cc.egui_ctx);
         app.apply_typography(&cc.egui_ctx);
+        write_startup_stage("4. BloomApp::new complete");
         app
     }
 
@@ -426,6 +501,9 @@ impl eframe::App for BloomApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if !self.first_frame_logged {
+            write_startup_stage("5. First ui() frame entered");
+        }
         let pending_snack = if let Ok(mut g) = self.shared.lock() {
             if let Some(msg) = g.pending_toast.take() {
                 self.toast.show_message(ui.ctx(), msg, 2.8);
@@ -758,5 +836,10 @@ impl eframe::App for BloomApp {
         }
 
         self.toast.ui(ui);
+
+        if !self.first_frame_logged {
+            self.first_frame_logged = true;
+            write_startup_stage("6. First ui() frame rendered");
+        }
     }
 }

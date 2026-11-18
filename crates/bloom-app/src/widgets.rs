@@ -38,6 +38,7 @@ pub fn labeled_text_field(
         });
 
         let avail = ui.available_width().max(100.0);
+        let field_w = (avail - 36.0).max(72.0);
         let focus_id = ui.make_persistent_id(label).with("focus_check");
         let focused = ui.ctx().data(|d| d.get_temp::<bool>(focus_id)).unwrap_or(false);
         let stroke = if focused && enabled {
@@ -52,14 +53,14 @@ pub fn labeled_text_field(
             .stroke(stroke)
             .inner_margin(Margin::symmetric(18, 12))
             .show(ui, |ui| {
-                ui.set_width((avail - 36.0).max(72.0));
+                ui.set_width(field_w);
                 ui.add_enabled(
                     enabled,
                     TextEdit::singleline(value)
                         .frame(Frame::NONE)
                         .margin(Margin::ZERO)
                         .align(Align2::LEFT_CENTER)
-                        .desired_width(f32::INFINITY)
+                        .desired_width(field_w)
                         .font(FontId::new(15.5, FontFamily::Proportional))
                         .text_color(if enabled {
                             p.text_primary
@@ -188,7 +189,7 @@ pub fn path_picker_field(
                                 .frame(Frame::NONE)
                                 .margin(Margin::ZERO)
                                 .align(Align2::LEFT_CENTER)
-                                .desired_width(f32::INFINITY)
+                                .desired_width(field_w)
                                 .font(FontId::new(15.0, FontFamily::Proportional))
                                 .text_color(if enabled {
                                     p.text_primary
