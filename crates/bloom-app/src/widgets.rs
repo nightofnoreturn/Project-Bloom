@@ -14,9 +14,12 @@ pub fn labeled_text_field(
     caption: Option<&str>,
     enabled: bool,
 ) -> Response {
+    let log_frame = !crate::FIRST_FRAME_DONE.load(std::sync::atomic::Ordering::Relaxed);
+    if log_frame {
+        crate::log_startup_stage(&format!("5.3d3-field pre-theme: {label}"));
+    }
     let theme = theme_from_ui(ui);
     let p = &theme.palette;
-    let log_frame = !crate::FIRST_FRAME_DONE.load(std::sync::atomic::Ordering::Relaxed);
     if log_frame {
         crate::log_startup_stage(&format!(
             "5.3d3-field enter: {label} (avail={:.1})",
@@ -90,8 +93,14 @@ pub fn labeled_text_field(
             crate::log_startup_stage(&format!("5.3d3-field done: {label}"));
         }
         let resp = frame_resp.inner;
+        if log_frame {
+            crate::log_startup_stage(&format!("5.3d3-field pre-datamut: {label}"));
+        }
         ui.ctx()
             .data_mut(|d| d.insert_temp(focus_id, resp.has_focus()));
+        if log_frame {
+            crate::log_startup_stage(&format!("5.3d3-field post-datamut: {label}"));
+        }
         resp
     })
     .inner
@@ -124,6 +133,9 @@ pub fn model_csc_inputs(
             {
                 model.make_ascii_uppercase();
                 changed = true;
+            }
+            if log_frame {
+                crate::log_startup_stage("5.3d3-wide post-col0");
             }
             if labeled_text_field(
                 &mut cols[1],

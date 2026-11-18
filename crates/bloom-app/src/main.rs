@@ -52,11 +52,16 @@ mod win_crash {
         fn SetUnhandledExceptionFilter(
             filter: Option<UnhandledExceptionFilter>,
         ) -> Option<UnhandledExceptionFilter>;
+        fn AddVectoredExceptionHandler(
+            first: u32,
+            handler: Option<UnhandledExceptionFilter>,
+        ) -> *mut c_void;
         fn SetThreadStackGuarantee(stack_size_in_bytes: *mut u32) -> i32;
     }
 
     extern "C" {
         fn signal(sig: i32, handler: extern "C" fn(i32)) -> *const c_void;
+        fn atexit(func: extern "C" fn()) -> i32;
     }
 
     fn write_crash_line(msg: &str) {
@@ -64,23 +69,51 @@ mod win_crash {
         super::log_startup_stage(msg);
     }
 
-    unsafe extern "system" fn exception_filter(info: *const ExceptionPointers) -> i32 {
-        let (code, addr) = if !info.is_null() {
-            let rec = (*info).exception_record;
-            if !rec.is_null() {
-                ((*rec).exception_code, (*rec).exception_address as usize)
-            } else {
-                (0, 0)
+    fn extract_code_addr(info: *const ExceptionPointers) -> (u32, usize) {
+        if !info.is_null() {
+            unsafe {
+                let rec = (*info).exception_record;
+                if !rec.is_null() {
+                    return ((*rec).exception_code, (*rec).exception_address as usize);
+                }
             }
-        } else {
-            (0, 0)
-        };
+        }
+        (0, 0)
+    }
+
+    unsafe extern "system" fn exception_filter(info: *const ExceptionPointers) -> i32 {
+        let (code, addr) = extract_code_addr(info);
         let mut buf = [0u8; 96];
         let mut cur = std::io::Cursor::new(&mut buf[..]);
         let _ = write!(cur, "Windows unhandled exception 0x{code:08X} at 0x{addr:016X}");
         let len = cur.position() as usize;
         if let Ok(msg) = std::str::from_utf8(&buf[..len]) {
             write_crash_line(msg);
+        }
+        0
+    }
+
+    unsafe extern "system" fn veh_handler(info: *const ExceptionPointers) -> i32 {
+        let (code, addr) = extract_code_addr(info);
+        if matches!(
+            code,
+            0xC000_0005
+                | 0xC000_0006
+                | 0xC000_001D
+                | 0xC000_008C
+                | 0xC000_0094
+                | 0xC000_0096
+                | 0xC000_00FD
+                | 0xC000_0374
+                | 0xC000_0409
+        ) {
+            let mut buf = [0u8; 96];
+            let mut cur = std::io::Cursor::new(&mut buf[..]);
+            let _ = write!(cur, "Windows VEH fatal exception 0x{code:08X} at 0x{addr:016X}");
+            let len = cur.position() as usize;
+            if let Ok(msg) = std::str::from_utf8(&buf[..len]) {
+                write_crash_line(msg);
+            }
         }
         0
     }
@@ -95,12 +128,28 @@ mod win_crash {
         }
     }
 
+    extern "C" fn on_atexit() {
+        if !super::FIRST_FRAME_DONE.load(std::sync::atomic::Ordering::Relaxed) {
+            write_crash_line("CRT atexit triggered before Frame 1 finished");
+        }
+    }
+
     pub(crate) fn install() {
         unsafe {
             let mut guarantee: u32 = 65_536;
             let _ = SetThreadStackGuarantee(&mut guarantee);
+            let _ = AddVectoredExceptionHandler(1, Some(veh_handler));
             let _ = SetUnhandledExceptionFilter(Some(exception_filter));
             let _ = signal(22, abort_handler);
+            let _ = atexit(on_atexit);
+        }
+    }
+
+    pub(crate) fn refresh_filter() {
+        unsafe {
+            let mut guarantee: u32 = 65_536;
+            let _ = SetThreadStackGuarantee(&mut guarantee);
+            let _ = SetUnhandledExceptionFilter(Some(exception_filter));
         }
     }
 }
@@ -588,6 +637,9 @@ impl BloomApp {
 
 impl Drop for BloomApp {
     fn drop(&mut self) {
+        if !FIRST_FRAME_DONE.load(Ordering::Relaxed) {
+            log_startup_stage("BloomApp::drop before Frame 1 finished");
+        }
         self.pause_download();
     }
 }
@@ -600,6 +652,8 @@ impl eframe::App for BloomApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let log_frame = !self.first_frame_logged;
         if log_frame {
+            #[cfg(windows)]
+            win_crash::refresh_filter();
             log_startup_stage("5. First ui() frame entered");
         }
         let pending_snack = if let Ok(mut g) = self.shared.lock() {
