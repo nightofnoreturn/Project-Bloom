@@ -139,15 +139,15 @@ impl BloomApp {
                 })
                 .collect();
 
-            OneUiPreferenceCaption::new(format!(
+            let caption = format!(
                 "{} ({}) • Source: {} • {} of {} builds",
                 res.model,
                 res.region,
                 res.source,
                 filtered.len(),
                 res.items.len(),
-            ))
-            .show(ui);
+            );
+            OneUiPreferenceCaption::new(&caption).show(ui);
 
             if res.items.is_empty() && !res.changelogs.is_empty() {
                 CardSection::new()
@@ -312,13 +312,13 @@ impl BloomApp {
                 })
                 .collect();
 
-            OneUiPreferenceCaption::new(format!(
+            let caption = format!(
                 "{} ({}) • {} official changelog(s) from doc.samsungmobile.com",
                 res.model,
                 res.region,
                 matched.len(),
-            ))
-            .show(ui);
+            );
+            OneUiPreferenceCaption::new(&caption).show(ui);
 
             for (idx, cl) in matched {
                 CardSection::new()

@@ -56,10 +56,10 @@ impl BloomApp {
         let matches = self.csc_db.search(&self.csc_query);
         let total_matches = matches.len();
 
-        OneUiPreferenceCaption::new(format!(
+        let caption = format!(
             "{total_matches} matching Samsung CSC region(s) — tap a row or jump A–Z on the right"
-        ))
-        .show(ui);
+        );
+        OneUiPreferenceCaption::new(&caption).show(ui);
 
         if matches.is_empty() {
             CardSection::new()

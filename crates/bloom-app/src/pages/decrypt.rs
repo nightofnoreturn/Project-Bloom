@@ -351,7 +351,8 @@ impl BloomApp {
         }
 
         if let Some(ref fw) = resolved_fw {
-            OneUiPreferenceCaption::new(format!("Active session build: {fw}")).show(ui);
+            let caption = format!("Active session build: {fw}");
+            OneUiPreferenceCaption::new(&caption).show(ui);
         }
         ui.add_space(92.0);
     }
