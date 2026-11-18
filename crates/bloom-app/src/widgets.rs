@@ -16,6 +16,13 @@ pub fn labeled_text_field(
 ) -> Response {
     let theme = theme_from_ui(ui);
     let p = &theme.palette;
+    let log_frame = !crate::FIRST_FRAME_DONE.load(std::sync::atomic::Ordering::Relaxed);
+    if log_frame {
+        crate::log_startup_stage(&format!(
+            "5.3d3-field enter: {label} (avail={:.1})",
+            ui.available_width()
+        ));
+    }
 
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
@@ -27,6 +34,9 @@ pub fn labeled_text_field(
                     .color(p.text_muted),
             );
             if let Some(cap) = caption {
+                if log_frame {
+                    crate::log_startup_stage(&format!("5.3d3-field caption rtl: {label}"));
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(
                         RichText::new(cap)
@@ -47,6 +57,11 @@ pub fn labeled_text_field(
             Stroke::new(dimens::SEARCH_BOTTOM_STROKE.max(0.8), p.floating_stroke)
         };
 
+        if log_frame {
+            crate::log_startup_stage(&format!(
+                "5.3d3-field TextEdit: {label} (field_w={field_w:.1})"
+            ));
+        }
         let frame_resp = Frame::NONE
             .fill(p.surface_container)
             .corner_radius(CornerRadius::same(dimens::SEARCH_PLATE_RADIUS))
@@ -71,6 +86,9 @@ pub fn labeled_text_field(
                 )
             });
 
+        if log_frame {
+            crate::log_startup_stage(&format!("5.3d3-field done: {label}"));
+        }
         let resp = frame_resp.inner;
         ui.ctx()
             .data_mut(|d| d.insert_temp(focus_id, resp.has_focus()));
@@ -88,7 +106,11 @@ pub fn model_csc_inputs(
     enabled: bool,
 ) -> bool {
     let mut changed = false;
+    let log_frame = !crate::FIRST_FRAME_DONE.load(std::sync::atomic::Ordering::Relaxed);
     if ui.available_width() >= 520.0 {
+        if log_frame {
+            crate::log_startup_stage("5.3d3-wide columns");
+        }
         ui.columns(2, |cols| {
             if labeled_text_field(
                 &mut cols[0],
@@ -118,6 +140,9 @@ pub fn model_csc_inputs(
             }
         });
     } else {
+        if log_frame {
+            crate::log_startup_stage("5.3d3-narrow stacked");
+        }
         if labeled_text_field(ui, "Device Model", model, "e.g. SM-S928B", None, enabled).changed() {
             model.make_ascii_uppercase();
             changed = true;

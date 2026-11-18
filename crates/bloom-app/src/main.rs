@@ -24,6 +24,86 @@ use tasks::{
 use widgets::pill_tag;
 
 static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
+pub(crate) static FIRST_FRAME_DONE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows)]
+mod win_crash {
+    use std::ffi::c_void;
+    use std::io::Write as _;
+
+    #[repr(C)]
+    struct ExceptionRecord {
+        exception_code: u32,
+        _exception_flags: u32,
+        _exception_record: *const ExceptionRecord,
+        exception_address: *const c_void,
+        _number_parameters: u32,
+    }
+
+    #[repr(C)]
+    struct ExceptionPointers {
+        exception_record: *const ExceptionRecord,
+        _context_record: *const c_void,
+    }
+
+    type UnhandledExceptionFilter = unsafe extern "system" fn(*const ExceptionPointers) -> i32;
+
+    extern "system" {
+        fn SetUnhandledExceptionFilter(
+            filter: Option<UnhandledExceptionFilter>,
+        ) -> Option<UnhandledExceptionFilter>;
+        fn SetThreadStackGuarantee(stack_size_in_bytes: *mut u32) -> i32;
+    }
+
+    extern "C" {
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> *const c_void;
+    }
+
+    fn write_crash_line(msg: &str) {
+        let _ = std::fs::write(std::env::temp_dir().join("bloom-crash.log"), msg);
+        super::log_startup_stage(msg);
+    }
+
+    unsafe extern "system" fn exception_filter(info: *const ExceptionPointers) -> i32 {
+        let (code, addr) = if !info.is_null() {
+            let rec = (*info).exception_record;
+            if !rec.is_null() {
+                ((*rec).exception_code, (*rec).exception_address as usize)
+            } else {
+                (0, 0)
+            }
+        } else {
+            (0, 0)
+        };
+        let mut buf = [0u8; 96];
+        let mut cur = std::io::Cursor::new(&mut buf[..]);
+        let _ = write!(cur, "Windows unhandled exception 0x{code:08X} at 0x{addr:016X}");
+        let len = cur.position() as usize;
+        if let Ok(msg) = std::str::from_utf8(&buf[..len]) {
+            write_crash_line(msg);
+        }
+        0
+    }
+
+    extern "C" fn abort_handler(sig: i32) {
+        let mut buf = [0u8; 48];
+        let mut cur = std::io::Cursor::new(&mut buf[..]);
+        let _ = write!(cur, "Process received signal {sig}");
+        let len = cur.position() as usize;
+        if let Ok(msg) = std::str::from_utf8(&buf[..len]) {
+            write_crash_line(msg);
+        }
+    }
+
+    pub(crate) fn install() {
+        unsafe {
+            let mut guarantee: u32 = 65_536;
+            let _ = SetThreadStackGuarantee(&mut guarantee);
+            let _ = SetUnhandledExceptionFilter(Some(exception_filter));
+            let _ = signal(22, abort_handler);
+        }
+    }
+}
 
 fn write_startup_stage(stage: &str) {
     let path = std::env::temp_dir().join("bloom-startup.log");
@@ -77,6 +157,8 @@ fn report_fatal(title: &str, details: &str) {
 }
 
 fn install_panic_hook() {
+    #[cfg(windows)]
+    win_crash::install();
     std::panic::set_hook(Box::new(|info| {
         let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
             (*s).to_owned()
@@ -873,6 +955,7 @@ impl eframe::App for BloomApp {
 
         if !self.first_frame_logged {
             self.first_frame_logged = true;
+            FIRST_FRAME_DONE.store(true, Ordering::Relaxed);
             log_startup_stage("6. First ui() frame rendered");
         }
     }

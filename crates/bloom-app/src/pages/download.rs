@@ -323,6 +323,7 @@ impl BloomApp {
 
         if log_frame {
             crate::log_startup_stage("5.3d DeviceCard");
+            crate::log_startup_stage("5.3d1 SectionHeader");
         }
         // Device & Firmware target card
         SectionHeader::new("Device & Firmware").show(ui);
@@ -334,6 +335,9 @@ impl BloomApp {
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 12.0;
 
+                        if log_frame {
+                            crate::log_startup_stage("5.3d2 CardSection + find_exact");
+                        }
                         let csc_upper = self.config.csc.trim().to_ascii_uppercase();
                         let csc_caption = self.csc_db.find_exact(&csc_upper).map(|item| {
                             let countries = if item.countries.is_empty() {
@@ -344,6 +348,9 @@ impl BloomApp {
                             format!("{countries} • {}", item.carriers.join(", "))
                         });
 
+                        if log_frame {
+                            crate::log_startup_stage("5.3d3 model_csc_inputs");
+                        }
                         let device_changed = model_csc_inputs(
                             ui,
                             &mut self.config.model,
@@ -360,6 +367,9 @@ impl BloomApp {
                         }
 
                         if !self.config.auto_fw {
+                            if log_frame {
+                                crate::log_startup_stage("5.3d4 manual_fw");
+                            }
                             if labeled_text_field(
                                 ui,
                                 "Manual Firmware (PDA/CSC/CP/DATA)",
@@ -375,6 +385,9 @@ impl BloomApp {
                         }
                     });
 
+                if log_frame {
+                    crate::log_startup_stage("5.3d5 CardItem Browse CSC");
+                }
                 if ui
                     .add(
                         CardItem::new("Browse CSC regions")
@@ -393,6 +406,9 @@ impl BloomApp {
                     self.page_id = BloomPage::Csc.id();
                 }
             });
+        if log_frame {
+            crate::log_startup_stage("5.3d6 after DeviceCard");
+        }
 
         // Checked firmware metadata card
         if binary.is_some() || resolved_fw.is_some() {
