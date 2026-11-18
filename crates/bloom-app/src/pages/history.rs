@@ -149,6 +149,28 @@ impl BloomApp {
             ))
             .show(ui);
 
+            if res.items.is_empty() && !res.changelogs.is_empty() {
+                CardSection::new()
+                    .inner_margin(Margin::symmetric(20, 16))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 10.0;
+                        ui.label(
+                            RichText::new(format!(
+                                "No FUS build list returned, but {} official changelog(s) are available.",
+                                res.changelogs.len()
+                            ))
+                            .font(font_id(ui, 14.5, OneUiFontWeight::Medium))
+                            .color(p.text_primary),
+                        );
+                        if ui
+                            .add(OneUiButton::primary("Open Official Changelogs"))
+                            .clicked()
+                        {
+                            self.history_tab_idx = 1;
+                        }
+                    });
+            }
+
             for (orig_idx, item) in filtered {
                 CardSection::new()
                     .inner_margin(Margin::symmetric(20, 14))

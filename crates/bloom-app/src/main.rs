@@ -451,17 +451,18 @@ impl eframe::App for BloomApp {
         let theme = theme_from_ui(ui);
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (is_busy, is_downloading, is_paused, has_resumable, csc_hint) = match self.shared.lock()
-        {
-            Ok(g) => (
-                g.is_busy(),
-                g.downloading,
-                g.paused,
-                !g.resumable.is_empty(),
-                self.config.csc.trim().to_ascii_uppercase(),
-            ),
-            Err(_) => (false, false, false, false, String::new()),
-        };
+        let (is_busy, is_checking, is_downloading, is_paused, has_resumable, csc_hint) =
+            match self.shared.lock() {
+                Ok(g) => (
+                    g.is_busy(),
+                    g.checking,
+                    g.downloading,
+                    g.paused,
+                    !g.resumable.is_empty(),
+                    self.config.csc.trim().to_ascii_uppercase(),
+                ),
+                Err(_) => (false, false, false, false, false, String::new()),
+            };
 
         if is_busy {
             ui.ctx()
@@ -623,9 +624,14 @@ impl eframe::App for BloomApp {
                                 bar_action =
                                     OneUiDividerButtonLayout::new("dl_active_bar", &items).show(ui);
                             } else {
+                                let check_label = if is_checking {
+                                    "Checking..."
+                                } else {
+                                    "Check Latest"
+                                };
                                 let dl_label = if is_paused { "Resume" } else { "Download" };
                                 let items = [
-                                    DividerButtonItem::new("Check Latest")
+                                    DividerButtonItem::new(check_label)
                                         .icon(OneUiIcon::Search)
                                         .enabled(!is_busy),
                                     DividerButtonItem::new(dl_label)
