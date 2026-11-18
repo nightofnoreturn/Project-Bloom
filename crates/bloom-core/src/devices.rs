@@ -12,7 +12,7 @@ pub const SUPPORTED_DEVICES_CSV_URL: &str =
     "https://storage.googleapis.com/play_public/supported_devices.csv";
 
 /// Single Samsung Galaxy device entry extracted from Google Play's `supported_devices.csv`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GalaxyDevice {
     pub marketing_name: String,
     pub device: String,
