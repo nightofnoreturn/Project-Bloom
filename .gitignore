@@ -1,5 +1,6 @@
-# Local Bifrost reference directory (keep local, do not push)
+# Local reference directories (keep local, do not push)
 /Bifrost/
+/OneUI-Crate/
 
 # Rust / Cargo build outputs
 /target/
