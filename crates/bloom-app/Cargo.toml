@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 bloom-core = { path = "../bloom-core" }
 eframe.workspace = true
+egui.workspace = true
+egui-oneui.workspace = true
 rfd.workspace = true
 serde.workspace = true
 tokio.workspace = true

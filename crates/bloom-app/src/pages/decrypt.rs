@@ -1,0 +1,317 @@
+use std::path::Path;
+
+use egui::{vec2, Frame, Margin, RichText, Ui};
+use egui_oneui::prelude::*;
+
+use crate::state::{derive_decrypted_output, format_bytes, format_eta, open_folder_in_os};
+use crate::widgets::{
+    labeled_text_field, model_csc_inputs, path_picker_field, pill_tag, status_banner,
+};
+use crate::BloomApp;
+
+impl BloomApp {
+    pub fn render_decrypt_page(&mut self, ui: &mut Ui) {
+        let snap = match self.shared.lock() {
+            Ok(g) => (
+                g.decrypting,
+                g.is_busy(),
+                g.error_message.clone(),
+                g.decrypt_progress,
+                g.last_decrypted_path.clone(),
+                g.resolved_fw.clone(),
+            ),
+            Err(_) => return,
+        };
+        let (decrypting, is_busy, error_message, decrypt_progress, last_decrypted_path, resolved_fw) =
+            snap;
+        let theme = theme_from_ui(ui);
+        let p = &theme.palette;
+
+        if let Some(err) = error_message.as_deref() {
+            status_banner(ui, OneUiIcon::Info, p.functional_red, "Decryption Failed", Some(err));
+            ui.add_space(10.0);
+        }
+
+        SectionHeader::new("Firmware Packages")
+            .top_space(4.0)
+            .show(ui);
+        CardSection::new()
+            .inner_margin(Margin::symmetric(20, 14))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 12.0;
+                let (in_resp, in_browse) = path_picker_field(
+                    ui,
+                    "Encrypted Package (.enc4 / .enc2)",
+                    &mut self.decrypt_form.input_path,
+                    "Select a downloaded .enc4 or .enc2 file",
+                    "Browse",
+                    !decrypting,
+                );
+                if in_browse {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Samsung Encrypted Firmware", &["enc4", "enc2"])
+                        .add_filter("All Files", &["*"])
+                        .pick_file()
+                    {
+                        let p_str = path.display().to_string();
+                        self.decrypt_form.output_path = derive_decrypted_output(&p_str);
+                        self.decrypt_form.input_path = p_str;
+                    }
+                } else if in_resp.changed() && self.decrypt_form.output_path.trim().is_empty() {
+                    self.decrypt_form.output_path =
+                        derive_decrypted_output(&self.decrypt_form.input_path);
+                }
+
+                let (_, out_browse) = path_picker_field(
+                    ui,
+                    "Output Archive (.zip)",
+                    &mut self.decrypt_form.output_path,
+                    "Auto-derived by stripping .enc4 / .enc2",
+                    "Save As",
+                    !decrypting,
+                );
+                if out_browse {
+                    let default_name = Path::new(&self.decrypt_form.output_path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("firmware.zip");
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("ZIP Archive", &["zip"])
+                        .set_file_name(default_name)
+                        .save_file()
+                    {
+                        self.decrypt_form.output_path = path.display().to_string();
+                    }
+                }
+            });
+
+        SectionHeader::new("Decryption Key Source").show(ui);
+        CardSection::new()
+            .inner_margin(Margin::symmetric(0, 6))
+            .show(ui, |ui| {
+                if ui
+                    .add(
+                        RadioItem::new(
+                            !self.decrypt_form.use_manual_key,
+                            "Resolve key automatically via Samsung FUS",
+                        )
+                        .summary("Uses Model, CSC & Firmware build (offline MD5 for .enc2)")
+                        .enabled(!decrypting),
+                    )
+                    .clicked()
+                {
+                    self.decrypt_form.use_manual_key = false;
+                }
+                if ui
+                    .add(
+                        RadioItem::new(
+                            self.decrypt_form.use_manual_key,
+                            "Use explicit decryption key string",
+                        )
+                        .summary("Offline decryption without querying Samsung servers")
+                        .top_divider(true)
+                        .enabled(!decrypting),
+                    )
+                    .clicked()
+                {
+                    self.decrypt_form.use_manual_key = true;
+                }
+
+                paint_divider(ui, DividerInset::FullWidth);
+                Frame::NONE
+                    .inner_margin(Margin::symmetric(20, 14))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 12.0;
+
+                        if self.decrypt_form.use_manual_key {
+                            labeled_text_field(
+                                ui,
+                                "Raw Decryption Key",
+                                &mut self.decrypt_form.manual_key,
+                                "Enter v4 key or CSC:MODEL:FW key string",
+                                None,
+                                !decrypting,
+                            );
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Target Metadata")
+                                        .font(font_id(ui, 13.5, OneUiFontWeight::Medium))
+                                        .color(p.text_muted),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                OneUiButton::new("Sync from Download")
+                                                    .enabled(!decrypting)
+                                                    .min_size(vec2(148.0, 30.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.decrypt_form.model = self.config.model.clone();
+                                            self.decrypt_form.csc = self.config.csc.clone();
+                                            self.decrypt_form.imei = self.config.imei.clone();
+                                            if let Some(ref fw) = resolved_fw {
+                                                self.decrypt_form.fw = fw.clone();
+                                            } else if !self.config.manual_fw.is_empty() {
+                                                self.decrypt_form.fw =
+                                                    self.config.manual_fw.clone();
+                                            }
+                                            self.toast.show_message(
+                                                ui.ctx(),
+                                                "Copied model & CSC from Download page",
+                                                2.0,
+                                            );
+                                        }
+                                    },
+                                );
+                            });
+
+                            model_csc_inputs(
+                                ui,
+                                &mut self.decrypt_form.model,
+                                &mut self.decrypt_form.csc,
+                                None,
+                                !decrypting,
+                            );
+
+                            if labeled_text_field(
+                                ui,
+                                "Firmware Version (PDA/CSC/CP/DATA)",
+                                &mut self.decrypt_form.fw,
+                                "e.g. S928BXXU4BYD9/...",
+                                None,
+                                !decrypting,
+                            )
+                            .changed()
+                            {
+                                self.decrypt_form.fw.make_ascii_uppercase();
+                            }
+
+                            labeled_text_field(
+                                ui,
+                                "IMEI / Serial (Optional, legacy fallback)",
+                                &mut self.decrypt_form.imei,
+                                "Leave blank to use embedded TAC database",
+                                None,
+                                !decrypting,
+                            );
+                        }
+
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(
+                                    OneUiButton::contained_primary("Decrypt Firmware")
+                                        .icon(OneUiIcon::Shield)
+                                        .loading(decrypting)
+                                        .enabled(!is_busy),
+                                )
+                                .clicked()
+                            {
+                                self.trigger_decrypt(ui.ctx());
+                            }
+                        });
+                    });
+            });
+
+        if decrypting || decrypt_progress.is_some() || last_decrypted_path.is_some() {
+            SectionHeader::new("Decryption Status").show(ui);
+            CardSection::new()
+                .inner_margin(Margin::symmetric(20, 14))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 10.0;
+                    if let Some((cur, tot, bps)) = decrypt_progress {
+                        let frac = if tot > 0 {
+                            (cur as f64 / tot as f64).clamp(0.0, 1.0) as f32
+                        } else {
+                            0.0
+                        };
+                        ui.horizontal(|ui| {
+                            if decrypting {
+                                ui.add(
+                                    OneUiSpinner::determinate(SpinnerSize::Small, frac)
+                                        .gradient(true),
+                                );
+                                ui.add_space(8.0);
+                            }
+                            ui.label(
+                                RichText::new(if decrypting {
+                                    "Decrypting multi-core AES-128-ECB..."
+                                } else {
+                                    "Decryption Complete"
+                                })
+                                .font(font_id(ui, 15.0, OneUiFontWeight::SemiBold))
+                                .color(p.text_primary),
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                pill_tag(
+                                    ui,
+                                    &format!("{:.1}%", frac * 100.0),
+                                    p.selected_bg,
+                                    p.primary_high,
+                                );
+                            });
+                        });
+                        ui.add(
+                            OneUiProgressBar::determinate(frac)
+                                .height(8.0)
+                                .gradient(true),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 18.0;
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} / {}",
+                                    format_bytes(cur),
+                                    format_bytes(tot)
+                                ))
+                                .font(font_id(ui, 13.5, OneUiFontWeight::Medium))
+                                .color(p.text_primary),
+                            );
+                            if bps > 0 {
+                                let rem = tot.saturating_sub(cur);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}/s  •  ETA {}",
+                                        format_bytes(bps),
+                                        format_eta(rem, bps)
+                                    ))
+                                    .font(font_id(ui, 13.5, OneUiFontWeight::Regular))
+                                    .color(p.text_secondary),
+                                );
+                            }
+                        });
+                    } else if decrypting {
+                        ui.horizontal(|ui| {
+                            ui.add(OneUiSpinner::indeterminate(SpinnerSize::Small));
+                            ui.add_space(8.0);
+                            ui.label("Deriving decryption key from Samsung FUS...");
+                        });
+                        ui.add(OneUiProgressBar::indeterminate().height(8.0));
+                    }
+
+                    if let Some(ref out_path) = last_decrypted_path.filter(|_| !decrypting) {
+                        status_banner(
+                            ui,
+                            OneUiIcon::Check,
+                            p.functional_green,
+                            "Decrypted ZIP Ready",
+                            Some(&out_path.display().to_string()),
+                        );
+                        if ui.add(OneUiButton::primary("Open Folder")).clicked() {
+                            if let Err(err) = open_folder_in_os(out_path) {
+                                self.toast.show_message(
+                                    ui.ctx(),
+                                    format!("Could not open folder: {err}"),
+                                    2.4,
+                                );
+                            }
+                        }
+                    }
+                });
+        }
+    }
+}
