@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -8,8 +9,8 @@ use bloom_core::crypto::{decrypt_file_parallel, get_v2_key, key_from_string};
 use bloom_core::data::{BinaryFileInfo, CscDb, ImeiDb};
 use bloom_core::fus::{resolve_binary_with_fallback, FusClient, FusMode};
 use bloom_core::{
-    download_and_decrypt, list_resumable_states, BloomError, DownloadHandle, DownloadOptions,
-    DownloadStateFile, JobStage, ProgressSnapshot,
+    download_and_decrypt, fetch_firmware_history, list_resumable_states, BloomError, ChangelogLang,
+    DownloadHandle, DownloadOptions, DownloadStateFile, HistoryResult, JobStage, ProgressSnapshot,
 };
 use eframe::egui;
 use rfd::FileDialog;
@@ -35,8 +36,15 @@ fn main() -> eframe::Result {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Download,
+    History,
     Decrypt,
     CscLookup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CscTarget {
+    Download,
+    History,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +129,10 @@ struct SharedUiState {
     decrypt_bps: u64,
     decrypt_message: String,
     decrypt_is_error: bool,
+    history_running: bool,
+    history_result: Option<HistoryResult>,
+    history_message: String,
+    history_is_error: bool,
     resumable_dirty: bool,
 }
 
@@ -145,9 +157,21 @@ impl Default for SharedUiState {
             decrypt_bps: 0,
             decrypt_message: String::new(),
             decrypt_is_error: false,
+            history_running: false,
+            history_result: None,
+            history_message: String::new(),
+            history_is_error: false,
             resumable_dirty: true,
         }
     }
+}
+
+#[derive(Default)]
+struct HistoryForm {
+    model: String,
+    csc: String,
+    lang: ChangelogLang,
+    filter: String,
 }
 
 #[derive(Default)]
@@ -165,6 +189,7 @@ struct BloomApp {
     rt: Runtime,
     config: AppConfig,
     tab: Tab,
+    csc_target: CscTarget,
     csc_db: CscDb,
     imei_db: Arc<ImeiDb>,
     csc_query: String,
@@ -172,6 +197,7 @@ struct BloomApp {
     active_handle: Option<DownloadHandle>,
     resumable_jobs: Vec<DownloadStateFile>,
     last_scanned_dir: String,
+    history_form: HistoryForm,
     decrypt_form: DecryptForm,
     applied_theme: bool,
 }
@@ -193,6 +219,12 @@ impl BloomApp {
         let last_scanned_dir = config.output_dir.clone();
         let resumable_jobs = list_resumable_states(Path::new(&last_scanned_dir));
 
+        let history_form = HistoryForm {
+            model: config.model.clone(),
+            csc: config.csc.clone(),
+            ..Default::default()
+        };
+
         let decrypt_form = DecryptForm {
             model: config.model.clone(),
             csc: config.csc.clone(),
@@ -205,6 +237,7 @@ impl BloomApp {
             rt,
             config,
             tab: Tab::Download,
+            csc_target: CscTarget::Download,
             csc_db: CscDb::load_embedded(),
             imei_db: Arc::new(ImeiDb::load_embedded()),
             csc_query: String::new(),
@@ -215,6 +248,7 @@ impl BloomApp {
             active_handle: None,
             resumable_jobs,
             last_scanned_dir,
+            history_form,
             decrypt_form,
             applied_theme: false,
         }
@@ -675,6 +709,7 @@ impl BloomApp {
                         }
                         if ui.add_enabled(!is_running, egui::Button::new("Browse CSC...")).clicked()
                         {
+                            self.csc_target = CscTarget::Download;
                             self.tab = Tab::CscLookup;
                         }
                         if let Some(item) = self.csc_db.find_exact(&self.config.csc) {
@@ -1048,6 +1083,301 @@ impl BloomApp {
         });
     }
 
+    fn start_fetch_history(&mut self, ctx: &egui::Context) {
+        let model = self.history_form.model.trim().to_ascii_uppercase();
+        let csc = self.history_form.csc.trim().to_ascii_uppercase();
+        let lang = self.history_form.lang;
+
+        if model.is_empty() || csc.is_empty() {
+            let mut guard = self.shared.lock().unwrap();
+            guard.history_is_error = true;
+            guard.history_message = "Please enter both Model and CSC first.".into();
+            return;
+        }
+
+        {
+            let mut guard = self.shared.lock().unwrap();
+            guard.history_running = true;
+            guard.history_is_error = false;
+            guard.history_message =
+                format!("Fetching history & changelogs for {model} ({csc})...");
+            guard.history_result = None;
+        }
+
+        let shared = Arc::clone(&self.shared);
+        let ctx = ctx.clone();
+
+        self.rt.spawn(async move {
+            let res = fetch_firmware_history(&model, &csc, lang).await;
+            let mut guard = shared.lock().unwrap();
+            guard.history_running = false;
+            match res {
+                Ok(hist) => {
+                    guard.history_is_error = false;
+                    guard.history_message = format!(
+                        "Loaded {} builds and {} changelog entries (source: {}).",
+                        hist.items.len(),
+                        hist.changelogs.len(),
+                        hist.source
+                    );
+                    guard.history_result = Some(hist);
+                }
+                Err(e) => {
+                    guard.history_is_error = true;
+                    guard.history_message = format!("{e}");
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn render_history_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let snapshot = self.shared.lock().unwrap().clone();
+        let is_running = snapshot.history_running;
+
+        ui.group(|ui| {
+            ui.strong("Firmware History & Official Changelogs");
+            ui.add_space(6.0);
+            egui::Grid::new("history_grid")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Model:");
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(
+                            !is_running,
+                            egui::TextEdit::singleline(&mut self.history_form.model)
+                                .desired_width(220.0)
+                                .hint_text("e.g. SM-S928B"),
+                        );
+                        if ui
+                            .add_enabled(
+                                !is_running && !self.config.model.trim().is_empty(),
+                                egui::Button::new("Sync from Download"),
+                            )
+                            .clicked()
+                        {
+                            self.history_form.model = self.config.model.clone();
+                            self.history_form.csc = self.config.csc.clone();
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("CSC Region:");
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(
+                            !is_running,
+                            egui::TextEdit::singleline(&mut self.history_form.csc)
+                                .desired_width(120.0)
+                                .hint_text("e.g. XID"),
+                        );
+                        if ui
+                            .add_enabled(!is_running, egui::Button::new("Browse CSC..."))
+                            .clicked()
+                        {
+                            self.csc_target = CscTarget::History;
+                            self.tab = Tab::CscLookup;
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Changelog Language:");
+                    egui::ComboBox::from_id_salt("history_lang")
+                        .selected_text(match self.history_form.lang {
+                            ChangelogLang::English => "English",
+                            ChangelogLang::Indonesian => "Indonesia",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.history_form.lang,
+                                ChangelogLang::English,
+                                "English",
+                            );
+                            ui.selectable_value(
+                                &mut self.history_form.lang,
+                                ChangelogLang::Indonesian,
+                                "Indonesia",
+                            );
+                        });
+                    ui.end_row();
+                });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!is_running, egui::Button::new("Fetch History"))
+                    .clicked()
+                {
+                    self.start_fetch_history(ctx);
+                }
+                if is_running {
+                    ui.spinner();
+                }
+                if !snapshot.history_message.is_empty() {
+                    let color = if snapshot.history_is_error {
+                        egui::Color32::from_rgb(235, 95, 95)
+                    } else if is_running {
+                        ui.visuals().text_color()
+                    } else {
+                        egui::Color32::from_rgb(95, 205, 130)
+                    };
+                    ui.colored_label(color, &snapshot.history_message);
+                }
+            });
+        });
+
+        let Some(ref res) = snapshot.history_result else {
+            return;
+        };
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("Filter builds / OS / patch / notes:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.history_form.filter)
+                    .desired_width(280.0)
+                    .hint_text("e.g. 2026-10, Android 17, EZI..."),
+            );
+        });
+        ui.add_space(6.0);
+
+        let q = self.history_form.filter.trim().to_ascii_lowercase();
+        let mut download_action: Option<(String, Option<String>)> = None;
+        let mut decrypt_action: Option<String> = None;
+        let mut matched_builds = HashSet::new();
+
+        for (idx, item) in res.items.iter().enumerate() {
+            matched_builds.insert(item.build.clone());
+
+            let os = item.android_version.as_deref().unwrap_or("-");
+            let date = item.date.as_deref().unwrap_or("-");
+            let patch = item
+                .changelog
+                .as_ref()
+                .and_then(|c| c.sec_patch.as_deref())
+                .unwrap_or("-");
+            let notes = item
+                .changelog
+                .as_ref()
+                .and_then(|c| c.notes.as_deref())
+                .unwrap_or("");
+
+            if !q.is_empty() {
+                let hay = format!("{} {os} {date} {patch} {notes}", item.firmware)
+                    .to_ascii_lowercase();
+                if !hay.contains(&q) {
+                    continue;
+                }
+            }
+
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    if idx == 0 {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(95, 205, 130),
+                            format!("#1 Latest · {}", item.build),
+                        );
+                    } else {
+                        ui.strong(format!("#{} · {}", idx + 1, item.build));
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Send to Decrypt").clicked() {
+                            decrypt_action = Some(item.firmware.clone());
+                        }
+                        if ui.button("Download").clicked() {
+                            download_action =
+                                Some((item.firmware.clone(), item.android_version.clone()));
+                        }
+                    });
+                });
+
+                ui.monospace(&item.firmware);
+                ui.weak(format!("OS: {os}   ·   Date: {date}   ·   Security Patch: {patch}"));
+
+                if !notes.is_empty() {
+                    ui.add_space(4.0);
+                    egui::CollapsingHeader::new("Changelog Notes")
+                        .id_salt(&item.firmware)
+                        .default_open(idx == 0)
+                        .show(ui, |ui| {
+                            ui.label(notes);
+                        });
+                }
+            });
+            ui.add_space(6.0);
+        }
+
+        let extra_logs: Vec<_> = res
+            .changelogs
+            .iter()
+            .filter(|c| !matched_builds.contains(&c.firmware))
+            .filter(|c| {
+                if q.is_empty() {
+                    return true;
+                }
+                let hay = format!(
+                    "{} {} {} {} {}",
+                    c.firmware,
+                    c.android_ver.as_deref().unwrap_or(""),
+                    c.rel_date.as_deref().unwrap_or(""),
+                    c.sec_patch.as_deref().unwrap_or(""),
+                    c.notes.as_deref().unwrap_or("")
+                )
+                .to_ascii_lowercase();
+                hay.contains(&q)
+            })
+            .collect();
+
+        if !extra_logs.is_empty() {
+            ui.add_space(6.0);
+            egui::CollapsingHeader::new(format!(
+                "Additional Changelog Archive ({} entries)",
+                extra_logs.len()
+            ))
+            .id_salt("extra_changelog_archive")
+            .show(ui, |ui| {
+                for cl in extra_logs {
+                    ui.group(|ui| {
+                        ui.strong(&cl.firmware);
+                        ui.weak(format!(
+                            "OS: {}   ·   Date: {}   ·   Security Patch: {}",
+                            cl.android_ver.as_deref().unwrap_or("-"),
+                            cl.rel_date.as_deref().unwrap_or("-"),
+                            cl.sec_patch.as_deref().unwrap_or("-")
+                        ));
+                        if let Some(ref notes) = cl.notes {
+                            ui.add_space(4.0);
+                            ui.label(notes);
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+        }
+
+        if let Some((fw, os)) = download_action {
+            self.config.model = res.model.clone();
+            self.config.csc = res.region.clone();
+            self.config.fw = fw;
+            self.config.manual_fw = true;
+            {
+                let mut guard = self.shared.lock().unwrap();
+                guard.checked_fw = None;
+                guard.checked_info = None;
+                guard.checked_os = os.unwrap_or_default();
+                guard.status_message = "Firmware pre-filled from History. Click Download / Resume to start.".into();
+                guard.kind = TaskStatusKind::Idle;
+            }
+            self.tab = Tab::Download;
+        } else if let Some(fw) = decrypt_action {
+            self.decrypt_form.model = res.model.clone();
+            self.decrypt_form.csc = res.region.clone();
+            self.decrypt_form.fw = fw;
+            self.tab = Tab::Decrypt;
+        }
+    }
+
     fn render_csc_tab(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Search CSC / Country / Carrier:");
@@ -1063,6 +1393,10 @@ impl BloomApp {
 
         let matches = self.csc_db.search(&self.csc_query);
         let mut selected_code: Option<String> = None;
+        let current_csc = match self.csc_target {
+            CscTarget::Download => &self.config.csc,
+            CscTarget::History => &self.history_form.csc,
+        };
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for item in matches {
@@ -1076,7 +1410,7 @@ impl BloomApp {
                         item.carriers.join(", ")
                     )
                 };
-                let is_cur = self.config.csc.eq_ignore_ascii_case(&item.code);
+                let is_cur = current_csc.eq_ignore_ascii_case(&item.code);
                 if ui.selectable_label(is_cur, text).clicked() {
                     selected_code = Some(item.code.clone());
                 }
@@ -1084,9 +1418,17 @@ impl BloomApp {
         });
 
         if let Some(code) = selected_code {
-            self.config.csc = code;
-            self.clear_checked_fw();
-            self.tab = Tab::Download;
+            match self.csc_target {
+                CscTarget::Download => {
+                    self.config.csc = code;
+                    self.clear_checked_fw();
+                    self.tab = Tab::Download;
+                }
+                CscTarget::History => {
+                    self.history_form.csc = code;
+                    self.tab = Tab::History;
+                }
+            }
         }
     }
 }
@@ -1134,6 +1476,7 @@ impl eframe::App for BloomApp {
                 ui.heading("Bloom");
                 ui.separator();
                 ui.selectable_value(&mut self.tab, Tab::Download, "Download");
+                ui.selectable_value(&mut self.tab, Tab::History, "History");
                 ui.selectable_value(&mut self.tab, Tab::Decrypt, "Decrypt");
                 ui.selectable_value(&mut self.tab, Tab::CscLookup, "CSC Lookup");
 
@@ -1159,6 +1502,7 @@ impl eframe::App for BloomApp {
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
                 Tab::Download => self.render_download_tab(ui, &ctx),
+                Tab::History => self.render_history_tab(ui, &ctx),
                 Tab::Decrypt => self.render_decrypt_tab(ui, &ctx),
                 Tab::CscLookup => self.render_csc_tab(ui),
             });

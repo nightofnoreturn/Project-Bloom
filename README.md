@@ -8,6 +8,7 @@ Native, lightweight, crash-resilient Samsung firmware downloader & decrypter for
 - **Disconnect & Crash-Proof Resume:** Tracks per-segment byte offsets atomically in `.bloom-state.json`, auto-detects resumable partial downloads on launch, never deletes partial files on errors, and **automatically refreshes expired Samsung FUS `Authorization` tokens (`401`) mid-download**.
 - **Single-Pass Verification:** Computes CRC32 (hardware-accelerated via `crc32fast`) and MD5 simultaneously in one sequential read.
 - **Parallel AES-NI Decryption:** Decrypts `.enc4` and `.enc2` files across all CPU cores with bounded ~4 MiB memory usage.
+- **Firmware History & Official Changelogs:** Browse build history (`SmartHistory` / `version.xml`) alongside Samsung release dates, security patch levels, and localized changelogs (English / Indonesian), with 1-click Download or Decrypt handoff.
 - **Built-in CSC Browser & Speed Limiter:** Searchable database of 500+ Samsung CSC regions (`cscs.csv`) and optional bandwidth cap.
 
 ## Download
@@ -22,6 +23,9 @@ bloom csc XID
 
 # Check latest firmware & decryption key
 bloom check --model SM-S928B --csc XID
+
+# View firmware history & changelogs (English or Indonesian)
+bloom history --model SM-S928B --csc XID --lang id --notes
 
 # Download with 8 connections, verify, and decrypt (press Ctrl+C to pause anytime; re-run to resume)
 bloom download --model SM-S928B --csc XID --out ./downloads

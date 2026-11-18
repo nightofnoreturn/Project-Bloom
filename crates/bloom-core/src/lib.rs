@@ -3,6 +3,7 @@ pub mod data;
 pub mod downloader;
 pub mod error;
 pub mod fus;
+pub mod history;
 pub mod xml;
 
 pub use data::{BinaryFileInfo, CscDb, CscItem, ImeiDb, LatestVersionInfo, SmartBinaryInfo};
@@ -12,3 +13,4 @@ pub use downloader::{
 };
 pub use error::{BloomError, Result};
 pub use fus::{resolve_binary_with_fallback, FusClient, FusMode, PreparedDownload};
+pub use history::{fetch_firmware_history, Changelog, ChangelogLang, HistoryItem, HistoryResult};

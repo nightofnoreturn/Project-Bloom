@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use bloom_core::crypto::{decrypt_file_parallel, get_v2_key, key_from_string};
 use bloom_core::{
-    download_and_decrypt, resolve_binary_with_fallback, BloomError, CscDb, DownloadHandle,
-    DownloadOptions, FusClient, FusMode, ImeiDb, JobStage,
+    download_and_decrypt, fetch_firmware_history, resolve_binary_with_fallback, BloomError,
+    ChangelogLang, CscDb, DownloadHandle, DownloadOptions, FusClient, FusMode, ImeiDb, JobStage,
 };
 use clap::{Parser, Subcommand};
 
@@ -105,6 +105,21 @@ enum Commands {
         /// Optional filter by CSC code, ISO country code, or carrier name
         query: Option<String>,
     },
+    /// Show firmware build history & official Samsung changelogs for a model + CSC.
+    History {
+        /// Samsung device model (e.g. SM-S928B)
+        #[arg(short, long)]
+        model: String,
+        /// 3-letter CSC region code (e.g. XID, EUX, INS)
+        #[arg(short, long)]
+        csc: String,
+        /// Changelog language ("en" or "id")
+        #[arg(long, default_value = "en")]
+        lang: String,
+        /// Print full changelog release notes for each build
+        #[arg(long)]
+        notes: bool,
+    },
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -165,6 +180,47 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     item.countries.join(";"),
                     item.carriers.join(";")
                 );
+            }
+        }
+
+        Commands::History {
+            model,
+            csc,
+            lang,
+            notes,
+        } => {
+            let changelog_lang = if lang.trim().eq_ignore_ascii_case("id") {
+                ChangelogLang::Indonesian
+            } else {
+                ChangelogLang::English
+            };
+            let res = fetch_firmware_history(&model, &csc, changelog_lang).await?;
+            println!(
+                "History for {} ({}) [source: {}, {} builds, {} changelogs]\n",
+                res.model,
+                res.region,
+                res.source,
+                res.items.len(),
+                res.changelogs.len()
+            );
+            for (idx, item) in res.items.iter().enumerate() {
+                let tag = if idx == 0 { " [Latest]" } else { "" };
+                let os = item.android_version.as_deref().unwrap_or("-");
+                let date = item.date.as_deref().unwrap_or("-");
+                let patch = item
+                    .changelog
+                    .as_ref()
+                    .and_then(|c| c.sec_patch.as_deref())
+                    .unwrap_or("-");
+                println!("#{:<2} {}{tag}", idx + 1, item.firmware);
+                println!("    OS: {os} | Date: {date} | Security Patch: {patch}");
+                if notes {
+                    if let Some(ref text) = item.changelog.as_ref().and_then(|c| c.notes.as_ref()) {
+                        for line in text.lines() {
+                            println!("      {line}");
+                        }
+                    }
+                }
             }
         }
 

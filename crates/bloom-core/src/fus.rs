@@ -263,7 +263,7 @@ impl FusClient {
         self.fetch_version_xml(&model, &region).await
     }
 
-    async fn fetch_smart_history(
+    pub async fn fetch_smart_history(
         &mut self,
         model: &str,
         region: &str,
@@ -283,6 +283,21 @@ impl FusClient {
         }
 
         Ok(parse_history_infos(&body))
+    }
+
+    pub async fn fetch_version_xml_raw(&self, model: &str, region: &str) -> Result<Option<String>> {
+        let url = format!("https://fota-cloud-dn.ospserver.net:443/firmware/{region}/{model}/version.xml");
+        let response = self
+            .http
+            .get(url)
+            .header(USER_AGENT, "Kiss2.0_FUS")
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let bytes = response.bytes().await?;
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
     async fn fetch_version_xml(&self, model: &str, region: &str) -> Result<LatestVersionInfo> {
