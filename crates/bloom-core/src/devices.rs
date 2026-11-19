@@ -87,6 +87,17 @@ impl DeviceCatalog {
         self.entries.is_empty()
     }
 
+    pub fn find_by_model(&self, model: &str) -> Option<&GalaxyDevice> {
+        let needle = model.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return None;
+        }
+        self.entries
+            .iter()
+            .find(|e| e.model_lower == needle)
+            .map(|e| &e.device)
+    }
+
     /// Searches devices with prefix priority + multi-token substring matching.
     /// Returns `(matching_indices_capped, total_match_count)`.
     pub fn search_indices(&self, query: &str, limit: usize) -> (Vec<usize>, usize) {

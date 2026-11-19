@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bloom_core::{DeviceCatalog, HistoryItem, HistoryResult};
+use bloom_core::{ConnectedSamsungDevice, DeviceCatalog, HistoryItem, HistoryResult};
 use egui::Color32;
 use egui_oneui::prelude::OneUiIcon;
 use serde::{Deserialize, Serialize};
@@ -19,9 +19,7 @@ pub const ACCENT_PRESETS: [(&str, Color32); 5] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BloomPage {
     MyDevices,
-    History,
     Decrypt,
-    Csc,
     Settings,
     About,
 }
@@ -29,23 +27,19 @@ pub enum BloomPage {
 impl BloomPage {
     pub fn from_id(id: usize) -> Self {
         match id {
-            0 => Self::MyDevices,
-            1 => Self::History,
-            2 => Self::Decrypt,
-            3 => Self::Csc,
-            4 => Self::Settings,
-            _ => Self::About,
+            1 => Self::Decrypt,
+            2 => Self::Settings,
+            3 => Self::About,
+            _ => Self::MyDevices,
         }
     }
 
     pub fn id(self) -> usize {
         match self {
             Self::MyDevices => 0,
-            Self::History => 1,
-            Self::Decrypt => 2,
-            Self::Csc => 3,
-            Self::Settings => 4,
-            Self::About => 5,
+            Self::Decrypt => 1,
+            Self::Settings => 2,
+            Self::About => 3,
         }
     }
 
@@ -53,9 +47,7 @@ impl BloomPage {
     pub fn title(self) -> &'static str {
         match self {
             Self::MyDevices => "My Devices",
-            Self::History => "History",
             Self::Decrypt => "Decrypt",
-            Self::Csc => "CSC Regions",
             Self::Settings => "Settings",
             Self::About => "About",
         }
@@ -64,9 +56,7 @@ impl BloomPage {
     pub fn icon(self) -> OneUiIcon {
         match self {
             Self::MyDevices => OneUiIcon::Apps,
-            Self::History => OneUiIcon::Calendar,
             Self::Decrypt => OneUiIcon::Shield,
-            Self::Csc => OneUiIcon::Location,
             Self::Settings => OneUiIcon::Settings,
             Self::About => OneUiIcon::Info,
         }
@@ -79,7 +69,6 @@ pub struct AppConfig {
     pub model: String,
     pub csc: String,
     pub manual_fw: String,
-    pub auto_fw: bool,
     pub imei: String,
     pub output_dir: String,
     pub connections: usize,
@@ -98,10 +87,9 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            model: "SM-S928B".to_owned(),
-            csc: "XID".to_owned(),
+            model: String::new(),
+            csc: String::new(),
             manual_fw: String::new(),
-            auto_fw: true,
             imei: String::new(),
             output_dir: default_output_dir(),
             connections: 8,
@@ -144,7 +132,8 @@ pub enum SnackAction {
 #[derive(Debug, Default)]
 pub struct SharedUiState {
     pub decrypting: bool,
-    pub history_loading: bool,
+    pub usb_scanning: bool,
+    pub connected_devices: Vec<ConnectedSamsungDevice>,
     pub device_db_syncing: bool,
     pub device_db_error: Option<String>,
     pub device_catalog: DeviceCatalog,
@@ -154,7 +143,6 @@ pub struct SharedUiState {
     pub my_device_builds: Option<HistoryResult>,
     pub decrypt_progress: Option<(u64, u64, u64)>,
     pub last_decrypted_path: Option<PathBuf>,
-    pub history: Option<HistoryResult>,
     pub error_message: Option<String>,
     pub pending_toast: Option<String>,
     pub pending_snack: Option<(String, Option<&'static str>, SnackAction)>,
@@ -162,7 +150,7 @@ pub struct SharedUiState {
 
 impl SharedUiState {
     pub fn is_busy(&self) -> bool {
-        self.decrypting || self.history_loading || self.my_device_builds_loading
+        self.decrypting || self.my_device_builds_loading
     }
 }
 
@@ -176,13 +164,6 @@ pub struct DecryptForm {
     pub csc: String,
     pub fw: String,
     pub imei: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct SelectedChangelog {
-    pub item: HistoryItem,
-    pub model: String,
-    pub region: String,
 }
 
 /// Normalizes Samsung's OS strings (`"15"`, `"Android 16(Baklava)"`, `"U(Android 14)"`)
@@ -215,17 +196,60 @@ pub fn extract_android_number(text: &str) -> Option<&str> {
     None
 }
 
-/// Formats build release dates cleanly (`"2026-10-08 12:34:00"` -> `"2026-10-08"`).
-pub fn format_build_date(raw: Option<&str>) -> String {
-    raw.map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.split_whitespace().next().unwrap_or(s).replace('/', "-"))
-        .unwrap_or_else(|| "—".to_owned())
+/// Formats firmware tile titles as `"One UI 9 (A17)"` when a One UI version is known,
+/// falling back cleanly to `"Android 14"`.
+pub fn format_firmware_tile_title(one_ui: Option<&str>, android: Option<&str>) -> String {
+    if let Some(oui) = one_ui.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(num) = android.and_then(extract_android_number) {
+            return format!("{oui} (A{num})");
+        }
+        return oui.to_owned();
+    }
+    format_android_label(android)
+}
+
+/// Extracts the central emblem text for the firmware grid tile (`"9"`, `"8.5"`, or `"A14"`).
+pub fn extract_emblem_text(one_ui: Option<&str>, android: Option<&str>) -> String {
+    if let Some(oui) = one_ui.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(ver) = oui.split_whitespace().last() {
+            if ver.bytes().any(|b| b.is_ascii_digit()) {
+                return ver.to_owned();
+            }
+        }
+    }
+    if let Some(num) = android.and_then(extract_android_number) {
+        return format!("A{num}");
+    }
+    "FW".to_owned()
+}
+
+/// Formats build release date (`"2026-11-12"`), falling back to decoded PDA year-month (`"2026-10"`).
+pub fn format_tile_date(item: &HistoryItem) -> String {
+    if let Some(d) = item.date.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return d.split_whitespace().next().unwrap_or(d).replace('/', "-");
+    }
+    if let Some(decoded) = item.decoded_build() {
+        if let Some(fallback) = decoded.fallback_date_label() {
+            return fallback;
+        }
+    }
+    "—".to_owned()
+}
+
+/// Returns the last 4 characters of a Samsung PDA build string (e.g. `"EZJD"`).
+pub fn short_build_tail(build: &str) -> &str {
+    let trimmed = build.trim();
+    let start = trimmed.len().saturating_sub(4);
+    if trimmed.is_char_boundary(start) {
+        &trimmed[start..]
+    } else {
+        trimmed
+    }
 }
 
 pub fn format_sync_age(synced_at_unix: u64) -> String {
     if synced_at_unix == 0 {
-        return "Not synced".to_owned();
+        return "—".to_owned();
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -233,13 +257,13 @@ pub fn format_sync_age(synced_at_unix: u64) -> String {
         .unwrap_or(0);
     let diff = now.saturating_sub(synced_at_unix);
     if diff < 60 {
-        "Synced just now".to_owned()
+        "Just now".to_owned()
     } else if diff < 3600 {
-        format!("Synced {}m ago", diff / 60)
+        format!("{}m ago", diff / 60)
     } else if diff < 86_400 {
-        format!("Synced {}h ago", diff / 3600)
+        format!("{}h ago", diff / 3600)
     } else {
-        format!("Synced {}d ago", diff / 86_400)
+        format!("{}d ago", diff / 86_400)
     }
 }
 
@@ -317,13 +341,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_android_versions() {
-        assert_eq!(format_android_label(Some("16")), "Android 16");
+    fn formats_one_ui_and_android_tile_labels() {
         assert_eq!(
-            format_android_label(Some("Android 15(VanillaIceCream)")),
-            "Android 15"
+            format_firmware_tile_title(Some("One UI 9"), Some("C(Android 17)")),
+            "One UI 9 (A17)"
         );
-        assert_eq!(format_android_label(Some("U(Android 14)")), "Android 14");
-        assert_eq!(format_android_label(None), "Android");
+        assert_eq!(
+            format_firmware_tile_title(Some("One UI 8.5"), Some("16")),
+            "One UI 8.5 (A16)"
+        );
+        assert_eq!(
+            format_firmware_tile_title(None, Some("U(Android 14)")),
+            "Android 14"
+        );
+        assert_eq!(
+            extract_emblem_text(Some("One UI 8.5"), Some("16")),
+            "8.5"
+        );
+        assert_eq!(extract_emblem_text(None, Some("U(Android 14)")), "A14");
+        assert_eq!(short_build_tail("S921BXXUIEZJD"), "EZJD");
     }
 }

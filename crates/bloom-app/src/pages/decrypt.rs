@@ -3,7 +3,7 @@ use std::path::Path;
 use egui::{Frame, Margin, RichText, Ui};
 use egui_oneui::prelude::*;
 
-use crate::state::{derive_decrypted_output, format_bytes, format_eta, open_folder_in_os, BloomPage};
+use crate::state::{derive_decrypted_output, format_bytes, format_eta, open_folder_in_os};
 use crate::widgets::{
     labeled_text_field, model_csc_inputs, path_picker_field, pill_tag, status_banner,
 };
@@ -25,30 +25,24 @@ impl BloomApp {
         let p = &theme.palette;
 
         if let Some(err) = error_message.as_deref() {
-            status_banner(
-                ui,
-                OneUiIcon::Info,
-                p.functional_red,
-                "Decryption Failed",
-                Some(err),
-            );
+            status_banner(ui, OneUiIcon::Info, p.functional_red, "Failed", Some(err));
             ui.add_space(10.0);
         }
 
-        SectionHeader::new("Firmware Packages")
+        SectionHeader::new("Package")
             .top_space(4.0)
             .show(ui);
         CardSection::new()
             .inner_margin(Margin::symmetric(0, 6))
             .show(ui, |ui| {
                 let in_summary = if self.decrypt_form.input_path.trim().is_empty() {
-                    "Tap to select an .enc4 or .enc2 file".to_owned()
+                    ".enc4 / .enc2".to_owned()
                 } else {
                     self.decrypt_form.input_path.clone()
                 };
                 if ui
                     .add(
-                        CardItem::new("Encrypted package (.enc4 / .enc2)")
+                        CardItem::new("Input")
                             .icon(OneUiIcon::Shield)
                             .summary(in_summary)
                             .summary_highlight(!self.decrypt_form.input_path.trim().is_empty())
@@ -69,13 +63,13 @@ impl BloomApp {
                 }
 
                 let out_summary = if self.decrypt_form.output_path.trim().is_empty() {
-                    "Auto-derived by removing .enc4 / .enc2 suffix".to_owned()
+                    ".zip".to_owned()
                 } else {
                     self.decrypt_form.output_path.clone()
                 };
                 if ui
                     .add(
-                        CardItem::new("Output archive (.zip)")
+                        CardItem::new("Output")
                             .icon(OneUiIcon::Apps)
                             .summary(out_summary)
                             .summary_highlight(!self.decrypt_form.output_path.trim().is_empty())
@@ -98,14 +92,10 @@ impl BloomApp {
                     }
                 }
 
-                SwitchItem::new(
-                    &mut self.edit_decrypt_paths_inline,
-                    "Edit file paths manually",
-                )
-                .summary("Expand text fields to paste paths directly")
-                .top_divider(true)
-                .enabled(!decrypting)
-                .show(ui);
+                SwitchItem::new(&mut self.edit_decrypt_paths_inline, "Edit paths")
+                    .top_divider(true)
+                    .enabled(!decrypting)
+                    .show(ui);
 
                 if self.edit_decrypt_paths_inline {
                     Frame::NONE
@@ -114,9 +104,9 @@ impl BloomApp {
                             ui.spacing_mut().item_spacing.y = 12.0;
                             let (in_resp, in_browse) = path_picker_field(
                                 ui,
-                                "Input Path",
+                                "Input",
                                 &mut self.decrypt_form.input_path,
-                                "Select .enc4 or .enc2 file",
+                                ".enc4 / .enc2",
                                 "Browse",
                                 !decrypting,
                             );
@@ -139,10 +129,10 @@ impl BloomApp {
 
                             let (_, out_browse) = path_picker_field(
                                 ui,
-                                "Output Path",
+                                "Output",
                                 &mut self.decrypt_form.output_path,
-                                "Auto-derived .zip output path",
-                                "Save As",
+                                ".zip",
+                                "Save",
                                 !decrypting,
                             );
                             if out_browse {
@@ -162,18 +152,14 @@ impl BloomApp {
                 }
             });
 
-        SectionHeader::new("Decryption Key Source").show(ui);
+        SectionHeader::new("Key").show(ui);
         CardSection::new()
             .inner_margin(Margin::symmetric(0, 6))
             .show(ui, |ui| {
                 if ui
                     .add(
-                        RadioItem::new(
-                            !self.decrypt_form.use_manual_key,
-                            "Resolve key automatically via Samsung FUS",
-                        )
-                        .summary("Uses Model, CSC & Firmware build (offline MD5 for .enc2)")
-                        .enabled(!decrypting),
+                        RadioItem::new(!self.decrypt_form.use_manual_key, "Auto (FUS)")
+                            .enabled(!decrypting),
                     )
                     .clicked()
                 {
@@ -181,13 +167,9 @@ impl BloomApp {
                 }
                 if ui
                     .add(
-                        RadioItem::new(
-                            self.decrypt_form.use_manual_key,
-                            "Use explicit decryption key string",
-                        )
-                        .summary("Offline decryption without querying Samsung servers")
-                        .top_divider(true)
-                        .enabled(!decrypting),
+                        RadioItem::new(self.decrypt_form.use_manual_key, "Manual key")
+                            .top_divider(true)
+                            .enabled(!decrypting),
                     )
                     .clicked()
                 {
@@ -203,9 +185,9 @@ impl BloomApp {
                         if self.decrypt_form.use_manual_key {
                             labeled_text_field(
                                 ui,
-                                "Raw Decryption Key",
+                                "Key",
                                 &mut self.decrypt_form.manual_key,
-                                "Enter v4 key or CSC:MODEL:FW key string",
+                                "v4 key or CSC:MODEL:FW",
                                 None,
                                 !decrypting,
                             );
@@ -220,9 +202,9 @@ impl BloomApp {
 
                             if labeled_text_field(
                                 ui,
-                                "Firmware Version (PDA/CSC/CP/DATA)",
+                                "Firmware",
                                 &mut self.decrypt_form.fw,
-                                "e.g. S928BXXU4BYD9/...",
+                                "PDA/CSC/CP/DATA",
                                 None,
                                 !decrypting,
                             )
@@ -233,9 +215,9 @@ impl BloomApp {
 
                             labeled_text_field(
                                 ui,
-                                "IMEI / Serial (Optional, legacy fallback)",
+                                "IMEI (Optional)",
                                 &mut self.decrypt_form.imei,
-                                "Leave blank to use embedded TAC database",
+                                "Auto",
                                 None,
                                 !decrypting,
                             );
@@ -244,7 +226,7 @@ impl BloomApp {
             });
 
         if decrypting || decrypt_progress.is_some() || last_decrypted_path.is_some() {
-            SectionHeader::new("Decryption Status").show(ui);
+            SectionHeader::new("Progress").show(ui);
             CardSection::new()
                 .inner_margin(Margin::symmetric(20, 14))
                 .show(ui, |ui| {
@@ -265,9 +247,9 @@ impl BloomApp {
                             }
                             ui.label(
                                 RichText::new(if decrypting {
-                                    "Decrypting multi-core AES-128-ECB..."
+                                    "Decrypting"
                                 } else {
-                                    "Decryption Complete"
+                                    "Complete"
                                 })
                                 .font(font_id(ui, 15.0, OneUiFontWeight::SemiBold))
                                 .color(p.text_primary),
@@ -301,7 +283,7 @@ impl BloomApp {
                                 let rem = tot.saturating_sub(cur);
                                 ui.label(
                                     RichText::new(format!(
-                                        "{}/s  •  ETA {}",
+                                        "{}/s  •  {}",
                                         format_bytes(bps),
                                         format_eta(rem, bps)
                                     ))
@@ -314,7 +296,7 @@ impl BloomApp {
                         ui.horizontal(|ui| {
                             ui.add(OneUiSpinner::indeterminate(SpinnerSize::Small));
                             ui.add_space(8.0);
-                            ui.label("Deriving decryption key from Samsung FUS...");
+                            ui.label("Loading");
                         });
                         ui.add(OneUiProgressBar::indeterminate().height(8.0));
                     }
@@ -324,35 +306,22 @@ impl BloomApp {
                             ui,
                             OneUiIcon::Check,
                             p.functional_green,
-                            "Decrypted ZIP Ready",
+                            "Decrypted",
                             Some(&out_path.display().to_string()),
                         );
-                        if ui.add(OneUiButton::primary("Open Folder")).clicked() {
+                        if ui.add(OneUiButton::primary("Open")).clicked() {
                             if let Err(err) = open_folder_in_os(out_path) {
-                                self.toast.show_message(
-                                    ui.ctx(),
-                                    format!("Could not open folder: {err}"),
-                                    2.4,
-                                );
+                                self.toast.show_message(ui.ctx(), format!("{err}"), 2.4);
                             }
                         }
                     }
                 });
         }
 
-        ui.add_space(14.0);
-        let links = ["My Devices", "History"];
-        if let Some(idx) = RelativeLinksCard::new(&links).show(ui) {
-            self.page_id = match idx {
-                0 => BloomPage::MyDevices.id(),
-                _ => BloomPage::History.id(),
-            };
-        }
-
         ui.add_space(92.0);
     }
 
-    pub fn sync_decrypt_from_download(&mut self, ctx: &egui::Context) {
+    pub fn sync_decrypt_from_selection(&mut self, ctx: &egui::Context) {
         self.decrypt_form.model = self.config.model.clone();
         self.decrypt_form.csc = self.config.csc.clone();
         self.decrypt_form.imei = self.config.imei.clone();
@@ -361,7 +330,6 @@ impl BloomApp {
         } else if !self.config.manual_fw.is_empty() {
             self.decrypt_form.fw = self.config.manual_fw.clone();
         }
-        self.toast
-            .show_message(ctx, "Synced Model, CSC & Firmware", 2.0);
+        self.toast.show_message(ctx, "Synced", 1.8);
     }
 }

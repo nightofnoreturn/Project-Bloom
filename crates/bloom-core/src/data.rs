@@ -282,7 +282,12 @@ impl CscDb {
                 carriers,
             });
         }
-        items.sort_by(|a, b| a.code.cmp(&b.code));
+        items.sort_by(|a, b| {
+            a.region_name()
+                .to_ascii_lowercase()
+                .cmp(&b.region_name().to_ascii_lowercase())
+                .then_with(|| a.code.cmp(&b.code))
+        });
         Self { items }
     }
 
@@ -440,6 +445,8 @@ mod tests {
 
         let indo_matches = db.search("indonesia");
         assert!(indo_matches.iter().any(|item| item.code == "XID"));
+
+        assert_eq!(db.all()[0].region_name(), "Afghanistan");
     }
 
     #[test]

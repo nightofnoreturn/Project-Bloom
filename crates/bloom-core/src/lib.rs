@@ -5,6 +5,7 @@ pub mod downloader;
 pub mod error;
 pub mod fus;
 pub mod history;
+pub mod usb;
 pub mod xml;
 
 pub use data::{
@@ -22,4 +23,8 @@ pub use downloader::{
 };
 pub use error::{BloomError, Result};
 pub use fus::{resolve_binary_with_fallback, FusClient, FusMode, PreparedDownload};
-pub use history::{fetch_firmware_history, Changelog, ChangelogLang, HistoryItem, HistoryResult};
+pub use history::{
+    extract_one_ui_version_from_notes, fetch_firmware_history, propagate_one_ui_versions,
+    Changelog, ChangelogLang, DecodedBuildCode, FirmwareUpdateType, HistoryItem, HistoryResult,
+};
+pub use usb::{scan_connected_samsung_devices, ConnectedSamsungDevice};

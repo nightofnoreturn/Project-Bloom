@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use bloom_core::crypto::{decrypt_file_parallel, get_v2_key, key_from_string};
 use bloom_core::{
     default_device_cache_path, delete_galaxy_cache, fetch_and_cache_galaxy_devices,
-    fetch_firmware_history, resolve_binary_with_fallback, BloomError, ChangelogLang, DeviceCatalog,
-    ImeiDb,
+    fetch_firmware_history, resolve_binary_with_fallback, scan_connected_samsung_devices,
+    BloomError, ChangelogLang, DeviceCatalog, ImeiDb,
 };
 
 use crate::state::{derive_decrypted_output, DecryptForm, SharedUiState, SnackAction};
@@ -22,7 +22,7 @@ pub fn spawn_manual_decrypt(
     let input_str = form.input_path.trim().to_owned();
     if input_str.is_empty() {
         if let Ok(mut guard) = shared.lock() {
-            guard.error_message = Some("Select an .enc4 or .enc2 input file first.".to_owned());
+            guard.error_message = Some("Select .enc4 or .enc2".to_owned());
         }
         return;
     }
@@ -30,7 +30,7 @@ pub fn spawn_manual_decrypt(
     let in_path = PathBuf::from(&input_str);
     if !in_path.exists() {
         if let Ok(mut guard) = shared.lock() {
-            guard.error_message = Some(format!("File not found: {}", in_path.display()));
+            guard.error_message = Some(format!("Not found: {}", in_path.display()));
         }
         return;
     }
@@ -44,7 +44,7 @@ pub fn spawn_manual_decrypt(
 
     if form.use_manual_key && form.manual_key.trim().is_empty() {
         if let Ok(mut guard) = shared.lock() {
-            guard.error_message = Some("Enter a decryption key string.".to_owned());
+            guard.error_message = Some("Key required".to_owned());
         }
         return;
     }
@@ -55,9 +55,7 @@ pub fn spawn_manual_decrypt(
             || form.fw.trim().is_empty())
     {
         if let Ok(mut guard) = shared.lock() {
-            guard.error_message = Some(
-                "Model, CSC, and Firmware string are required to resolve the FUS key.".to_owned(),
-            );
+            guard.error_message = Some("Model, CSC & Firmware required".to_owned());
         }
         return;
     }
@@ -100,9 +98,7 @@ pub fn spawn_manual_decrypt(
                     Ok((_, info)) => info
                         .v4_key
                         .map(|(k, _)| k)
-                        .ok_or_else(|| {
-                            BloomError::Crypto("Samsung FUS did not return a v4 key.".into())
-                        }),
+                        .ok_or_else(|| BloomError::Crypto("Missing v4 key".into())),
                     Err(e) => Err(e),
                 }
             }
@@ -153,7 +149,7 @@ pub fn spawn_manual_decrypt(
                     guard.decrypting = false;
                     guard.last_decrypted_path = Some(out_path.clone());
                     guard.pending_snack = Some((
-                        "Firmware decrypted cleanly".to_owned(),
+                        "Decrypted".to_owned(),
                         Some("Open"),
                         SnackAction::OpenFolder(out_path),
                     ));
@@ -168,55 +164,11 @@ pub fn spawn_manual_decrypt(
             Err(e) => {
                 if let Ok(mut guard) = shared.lock() {
                     guard.decrypting = false;
-                    guard.error_message = Some(format!("Decrypt thread failed: {e}"));
-                }
-            }
-        }
-
-        ctx.request_repaint();
-    });
-}
-
-pub fn spawn_fetch_history(
-    rt: &tokio::runtime::Runtime,
-    shared: Arc<Mutex<SharedUiState>>,
-    ctx: egui::Context,
-    model: String,
-    csc: String,
-    lang: ChangelogLang,
-) {
-    let model = model.trim().to_ascii_uppercase();
-    let region = csc.trim().to_ascii_uppercase();
-
-    if model.is_empty() || region.is_empty() {
-        if let Ok(mut guard) = shared.lock() {
-            guard.error_message = Some("Model and CSC cannot be empty.".to_owned());
-        }
-        return;
-    }
-
-    if let Ok(mut guard) = shared.lock() {
-        guard.history_loading = true;
-        guard.error_message = None;
-    }
-    ctx.request_repaint();
-
-    rt.spawn(async move {
-        match fetch_firmware_history(&model, &region, lang).await {
-            Ok(res) => {
-                if let Ok(mut guard) = shared.lock() {
-                    guard.history_loading = false;
-                    guard.history = Some(res);
-                    guard.pending_toast = Some("Firmware history updated".to_owned());
-                }
-            }
-            Err(e) => {
-                if let Ok(mut guard) = shared.lock() {
-                    guard.history_loading = false;
                     guard.error_message = Some(e.to_string());
                 }
             }
         }
+
         ctx.request_repaint();
     });
 }
@@ -251,11 +203,7 @@ pub fn spawn_sync_galaxy_db(
                     guard.device_catalog_revision = guard.device_catalog_revision.wrapping_add(1);
                     guard.device_db_syncing = false;
                     guard.device_db_error = None;
-                    guard.pending_toast = Some(if force_rebuild {
-                        format!("Galaxy database rebuilt ({count} models)")
-                    } else {
-                        format!("Synced {count} Galaxy models")
-                    });
+                    guard.pending_toast = Some(format!("{count} models"));
                 }
             }
             Err(e) => {
@@ -307,5 +255,36 @@ pub fn spawn_fetch_my_device_builds(
             }
         }
         ctx.request_repaint();
+    });
+}
+
+pub fn spawn_scan_usb_devices(
+    rt: &tokio::runtime::Runtime,
+    shared: Arc<Mutex<SharedUiState>>,
+    ctx: egui::Context,
+) {
+    if let Ok(mut guard) = shared.lock() {
+        if guard.usb_scanning {
+            return;
+        }
+        guard.usb_scanning = true;
+    }
+
+    rt.spawn(async move {
+        let detected = tokio::task::spawn_blocking(scan_connected_samsung_devices)
+            .await
+            .unwrap_or_default();
+
+        let mut changed = false;
+        if let Ok(mut guard) = shared.lock() {
+            guard.usb_scanning = false;
+            if guard.connected_devices != detected {
+                guard.connected_devices = detected;
+                changed = true;
+            }
+        }
+        if changed {
+            ctx.request_repaint();
+        }
     });
 }

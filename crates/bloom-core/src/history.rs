@@ -36,6 +36,137 @@ pub struct Changelog {
     pub notes: Option<String>,
 }
 
+/// Classification of Samsung firmware update type from PDA build code (`U` vs `S`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FirmwareUpdateType {
+    Feature,
+    Security,
+    Other(char),
+}
+
+/// Decoded metadata extracted from the last 8 characters of a Samsung PDA build string
+/// (e.g. `S921B` + `XX U I E Z J D`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecodedBuildCode {
+    pub region_group: String,
+    pub update_type: FirmwareUpdateType,
+    pub bootloader_bit: char,
+    pub bootloader_level: u8,
+    pub os_gen: char,
+    pub year_code: char,
+    pub year: Option<u16>,
+    pub month_code: char,
+    pub month: Option<u8>,
+    pub revision_code: char,
+    pub revision: Option<u8>,
+}
+
+fn decode_base36_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'A'..=b'Z' => Some(10 + (byte - b'A')),
+        _ => None,
+    }
+}
+
+impl DecodedBuildCode {
+    /// Decodes a Samsung PDA string (or full `PDA/CSC/CP/DATA` firmware string).
+    pub fn decode(pda_or_fw: &str) -> Option<Self> {
+        let pda = build_from_fw(pda_or_fw).to_ascii_uppercase();
+        if pda.len() < 10 || !pda.is_ascii() {
+            return None;
+        }
+        let bytes = pda.as_bytes();
+        let tail = &bytes[bytes.len() - 8..];
+        if !tail.iter().all(u8::is_ascii_alphanumeric) {
+            return None;
+        }
+
+        let [r0, r1, upd, bit, os_gen, yr, mo, rev] = [
+            tail[0], tail[1], tail[2], tail[3], tail[4], tail[5], tail[6], tail[7],
+        ];
+        let bootloader_level = decode_base36_digit(bit)?;
+
+        let update_type = match upd {
+            b'U' => FirmwareUpdateType::Feature,
+            b'S' => FirmwareUpdateType::Security,
+            other => FirmwareUpdateType::Other(other as char),
+        };
+        let year = yr
+            .is_ascii_uppercase()
+            .then(|| 2001 + u16::from(yr - b'A'));
+        let month = matches!(mo, b'A'..=b'L').then(|| (mo - b'A') + 1);
+        let revision = decode_base36_digit(rev);
+
+        Some(Self {
+            region_group: format!("{}{}", r0 as char, r1 as char),
+            update_type,
+            bootloader_bit: bit as char,
+            bootloader_level,
+            os_gen: os_gen as char,
+            year_code: yr as char,
+            year,
+            month_code: mo as char,
+            month,
+            revision_code: rev as char,
+            revision,
+        })
+    }
+
+    /// Returns `true` when this build's bootloader bit is strictly lower than `installed_bootloader_level`,
+    /// meaning Samsung's anti-rollback fuse blocks downgrading to it.
+    pub fn is_downgrade_blocked(&self, installed_bootloader_level: u8) -> bool {
+        self.bootloader_level < installed_bootloader_level
+    }
+
+    pub fn month_short_name(&self) -> Option<&'static str> {
+        match self.month? {
+            1 => Some("Jan"),
+            2 => Some("Feb"),
+            3 => Some("Mar"),
+            4 => Some("Apr"),
+            5 => Some("May"),
+            6 => Some("Jun"),
+            7 => Some("Jul"),
+            8 => Some("Aug"),
+            9 => Some("Sep"),
+            10 => Some("Oct"),
+            11 => Some("Nov"),
+            12 => Some("Dec"),
+            _ => None,
+        }
+    }
+
+    pub fn fallback_date_label(&self) -> Option<String> {
+        Some(format!("{:04}-{:02}", self.year?, self.month?))
+    }
+
+    pub fn month_year_label(&self) -> Option<String> {
+        Some(format!("{} {}", self.month_short_name()?, self.year?))
+    }
+}
+
+/// Extracts a numbered `One UI <ver>` heading from the first non-empty line of changelog notes,
+/// ignoring generic unnumbered headers like `"One UI Update"`.
+pub fn extract_one_ui_version_from_notes(notes: &str) -> Option<String> {
+    let first_line = notes.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let lower = first_line.to_ascii_lowercase();
+    let pos = lower.find("one ui")?;
+    let after = lower[pos + "one ui".len()..].trim_start();
+    let after = after.strip_prefix('v').unwrap_or(after).trim_start();
+    let bytes = after.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+
+    let mut end = 0usize;
+    while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
+        end += 1;
+    }
+    let ver = after[..end].trim_end_matches('.');
+    (!ver.is_empty()).then(|| format!("One UI {ver}"))
+}
+
 /// A historical (or latest) downloadable firmware entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HistoryItem {
@@ -43,7 +174,50 @@ pub struct HistoryItem {
     pub build: String,
     pub date: Option<String>,
     pub android_version: Option<String>,
+    #[serde(default)]
+    pub one_ui_version: Option<String>,
     pub changelog: Option<Changelog>,
+}
+
+impl HistoryItem {
+    /// Decodes region group, update type, bootloader bit, and build date metadata from `build`.
+    pub fn decoded_build(&self) -> Option<DecodedBuildCode> {
+        DecodedBuildCode::decode(&self.build)
+    }
+}
+
+/// Propagates numbered `One UI X` versions forward chronologically (oldest -> newest) across
+/// changelog rows and firmware history entries until a newer `One UI Y` release appears.
+pub fn propagate_one_ui_versions(items: &mut [HistoryItem], changelogs: &[Changelog]) {
+    let mut cl_one_ui: HashMap<String, String> = HashMap::with_capacity(changelogs.len());
+    let mut current: Option<String> = None;
+
+    for cl in changelogs.iter().rev() {
+        if let Some(ver) = cl
+            .notes
+            .as_deref()
+            .and_then(extract_one_ui_version_from_notes)
+        {
+            current = Some(ver);
+        }
+        if let Some(ref ver) = current {
+            cl_one_ui.insert(cl.firmware.clone(), ver.clone());
+        }
+    }
+
+    let mut active: Option<String> = None;
+    for item in items.iter_mut().rev() {
+        let explicit = item
+            .changelog
+            .as_ref()
+            .and_then(|c| c.notes.as_deref())
+            .and_then(extract_one_ui_version_from_notes)
+            .or_else(|| cl_one_ui.get(&item.build).cloned());
+        if let Some(ver) = explicit {
+            active = Some(ver);
+        }
+        item.one_ui_version = active.clone();
+    }
 }
 
 /// Combined firmware history & changelog lookup result.
@@ -109,6 +283,7 @@ pub async fn fetch_firmware_history(
                     build,
                     date,
                     android_version,
+                    one_ui_version: None,
                     changelog: cl,
                 }
             })
@@ -139,10 +314,11 @@ pub async fn fetch_firmware_history(
     }
 
     let mut seen = HashSet::new();
-    let items: Vec<HistoryItem> = raw_items
+    let mut items: Vec<HistoryItem> = raw_items
         .into_iter()
         .filter(|item| seen.insert(item.firmware.clone()))
         .collect();
+    propagate_one_ui_versions(&mut items, &changelogs);
 
     Ok(HistoryResult {
         model,
@@ -202,6 +378,7 @@ pub fn parse_version_xml_history(xml: &str) -> Vec<HistoryItem> {
                 firmware: fw,
                 date: None,
                 android_version: latest.attribute("o").map(ToOwned::to_owned),
+                one_ui_version: None,
                 changelog: None,
             });
         }
@@ -224,6 +401,7 @@ pub fn parse_version_xml_history(xml: &str) -> Vec<HistoryItem> {
                     firmware: fw,
                     date: None,
                     android_version: None,
+                    one_ui_version: None,
                     changelog: None,
                 })
             })
@@ -628,5 +806,104 @@ mod tests {
             items[0].firmware,
             "S928BXXU6EZJB/S928BOLE6EZJB/S928BXXU6EZJB/S928BXXU6EZJB"
         );
+    }
+
+    #[test]
+    fn extracts_numbered_one_ui_only_from_first_line() {
+        assert_eq!(
+            extract_one_ui_version_from_notes("One UI 9\nGalaxy AI").as_deref(),
+            Some("One UI 9")
+        );
+        assert_eq!(
+            extract_one_ui_version_from_notes("One UI 8.5\nVisual design").as_deref(),
+            Some("One UI 8.5")
+        );
+        assert_eq!(
+            extract_one_ui_version_from_notes("One UI 8.0 (Android 16)\nGalaxy AI").as_deref(),
+            Some("One UI 8.0")
+        );
+        assert_eq!(
+            extract_one_ui_version_from_notes("Pembaruan One UI 7.0 (Android 15)\nGalaxy AI")
+                .as_deref(),
+            Some("One UI 7.0")
+        );
+        assert_eq!(
+            extract_one_ui_version_from_notes("One UI 6.1.1").as_deref(),
+            Some("One UI 6.1.1")
+        );
+        assert_eq!(
+            extract_one_ui_version_from_notes("One UI Update\nGalaxy AI"),
+            None
+        );
+        assert_eq!(
+            extract_one_ui_version_from_notes("Pembaruan One UI\nGalaxy AI"),
+            None
+        );
+        assert_eq!(
+            extract_one_ui_version_from_notes("• Security\nmentions One UI 9 on line 2"),
+            None
+        );
+    }
+
+    #[test]
+    fn propagates_one_ui_forward_chronologically() {
+        let mk_item = |build: &str, notes: Option<&str>| HistoryItem {
+            firmware: format!("{build}/{build}/{build}/{build}"),
+            build: build.to_owned(),
+            date: None,
+            android_version: None,
+            one_ui_version: None,
+            changelog: notes.map(|n| Changelog {
+                firmware: build.to_owned(),
+                android_ver: None,
+                rel_date: None,
+                sec_patch: None,
+                notes: Some(n.to_owned()),
+            }),
+        };
+
+        let mut items = vec![
+            mk_item("S921BXXUIEZJD", Some("• Stability and reliability")),
+            mk_item("S921BXXSIEZJ1", Some("• Security")),
+            mk_item("S921BXXUHEZIF", Some("One UI 9\nGalaxy AI")),
+            mk_item("S921BXXSHDZI1", Some("• Security")),
+            mk_item("S921BXXUEDZDR", Some("One UI 8.5\nVisual design")),
+            mk_item("S921BXXU3AXH7", Some("One UI Update\nGalaxy AI")),
+            mk_item("S921BXXU1AXBA", Some("• Initial release")),
+        ];
+
+        propagate_one_ui_versions(&mut items, &[]);
+
+        assert_eq!(items[0].one_ui_version.as_deref(), Some("One UI 9"));
+        assert_eq!(items[1].one_ui_version.as_deref(), Some("One UI 9"));
+        assert_eq!(items[2].one_ui_version.as_deref(), Some("One UI 9"));
+        assert_eq!(items[3].one_ui_version.as_deref(), Some("One UI 8.5"));
+        assert_eq!(items[4].one_ui_version.as_deref(), Some("One UI 8.5"));
+        assert_eq!(items[5].one_ui_version, None);
+        assert_eq!(items[6].one_ui_version, None);
+    }
+
+    #[test]
+    fn decodes_samsung_pda_build_codes() {
+        let ezjd = DecodedBuildCode::decode("S921BXXUIEZJD").expect("valid PDA");
+        assert_eq!(ezjd.region_group, "XX");
+        assert_eq!(ezjd.update_type, FirmwareUpdateType::Feature);
+        assert_eq!(ezjd.bootloader_bit, 'I');
+        assert_eq!(ezjd.bootloader_level, 18);
+        assert_eq!(ezjd.os_gen, 'E');
+        assert_eq!(ezjd.year, Some(2026));
+        assert_eq!(ezjd.month, Some(10));
+        assert_eq!(ezjd.revision, Some(13));
+        assert_eq!(ezjd.fallback_date_label().as_deref(), Some("2026-10"));
+        assert_eq!(ezjd.month_year_label().as_deref(), Some("Oct 2026"));
+
+        let old = DecodedBuildCode::decode("S921BXXS5AYB7/S921BOXM5AYB7/S921BXXU5AYB7")
+            .expect("valid full fw");
+        assert_eq!(old.update_type, FirmwareUpdateType::Security);
+        assert_eq!(old.bootloader_bit, '5');
+        assert_eq!(old.bootloader_level, 5);
+        assert!(old.is_downgrade_blocked(18));
+        assert!(!old.is_downgrade_blocked(5));
+        assert!(!ezjd.is_downgrade_blocked(18));
     }
 }

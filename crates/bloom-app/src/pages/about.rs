@@ -8,7 +8,7 @@ impl BloomApp {
         let (_update_clicked, link_idx) =
             AppInfoView::new("Project Bloom", env!("CARGO_PKG_VERSION"))
                 .update_state(AppUpdateState::LatestInstalled)
-                .links(&["Engine & Open Source Licenses", "Repository on GitHub"])
+                .links(&["Open Source", "GitHub"])
                 .show(ui);
 
         if let Some(idx) = link_idx {

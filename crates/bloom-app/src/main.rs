@@ -7,21 +7,17 @@ mod widgets;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bloom_core::{
-    default_device_cache_path, load_galaxy_cache, ChangelogLang, CscDb, CscItem, DeviceCatalog,
-    GalaxyDevice, HistoryItem, ImeiDb,
+    default_device_cache_path, load_galaxy_cache, CscDb, CscItem, DeviceCatalog, GalaxyDevice,
+    HistoryItem, ImeiDb,
 };
-use egui::{vec2, Frame, Id, Margin, RichText};
+use egui::{Frame, Id};
 use egui_oneui::prelude::*;
 
-use state::{
-    format_android_label, AppConfig, BloomPage, DecryptForm, SelectedChangelog, SharedUiState,
-    SnackAction, STORAGE_KEY,
-};
-use tasks::{spawn_fetch_history, spawn_manual_decrypt, spawn_sync_galaxy_db};
-use widgets::pill_tag;
+use state::{AppConfig, BloomPage, DecryptForm, SharedUiState, SnackAction, STORAGE_KEY};
+use tasks::{spawn_manual_decrypt, spawn_scan_usb_devices, spawn_sync_galaxy_db};
 
 static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
 
@@ -165,6 +161,7 @@ pub struct BloomApp {
     pub csc_db: CscDb,
     pub config: AppConfig,
     pub decrypt_form: DecryptForm,
+    pub last_usb_scan: Instant,
 
     // My Devices view & cached search state
     pub device_search_query: String,
@@ -181,14 +178,7 @@ pub struct BloomApp {
     pub build_detail_sheet_open: bool,
 
     // Other pages state
-    pub csc_query: String,
-    pub csc_quick_filter: Option<&'static str>,
-    pub csc_active_letter: Option<char>,
-    pub history_filter: String,
-    pub history_tab_idx: usize,
     pub edit_decrypt_paths_inline: bool,
-    pub selected_changelog: Option<SelectedChangelog>,
-    pub changelog_sheet_open: bool,
     pub licenses_sheet_open: bool,
 
     // Navigation & global overlays
@@ -241,6 +231,9 @@ impl BloomApp {
         if needs_initial_sync {
             spawn_sync_galaxy_db(&rt, Arc::clone(&shared), cc.egui_ctx.clone(), false);
         }
+        if cfg!(windows) {
+            spawn_scan_usb_devices(&rt, Arc::clone(&shared), cc.egui_ctx.clone());
+        }
 
         let decrypt_form = DecryptForm {
             model: config.model.clone(),
@@ -257,6 +250,7 @@ impl BloomApp {
             csc_db: CscDb::load_embedded(),
             config,
             decrypt_form,
+            last_usb_scan: Instant::now(),
 
             device_search_query: String::new(),
             device_search_cached_query: String::new(),
@@ -271,14 +265,7 @@ impl BloomApp {
             selected_grid_build: None,
             build_detail_sheet_open: false,
 
-            csc_query: String::new(),
-            csc_quick_filter: None,
-            csc_active_letter: None,
-            history_filter: String::new(),
-            history_tab_idx: 0,
             edit_decrypt_paths_inline: false,
-            selected_changelog: None,
-            changelog_sheet_open: false,
             licenses_sheet_open: false,
 
             page_id: BloomPage::MyDevices.id(),
@@ -332,22 +319,6 @@ impl BloomApp {
         );
     }
 
-    pub fn trigger_history(&self, ctx: &egui::Context) {
-        let lang = if self.config.history_lang_idx == 1 {
-            ChangelogLang::Indonesian
-        } else {
-            ChangelogLang::English
-        };
-        spawn_fetch_history(
-            &self.rt,
-            Arc::clone(&self.shared),
-            ctx.clone(),
-            self.config.model.clone(),
-            self.config.csc.clone(),
-            lang,
-        );
-    }
-
     pub fn load_build_into_decrypt(
         &mut self,
         model: String,
@@ -357,11 +328,10 @@ impl BloomApp {
     ) {
         self.decrypt_form.model = model;
         self.decrypt_form.csc = region;
-        self.decrypt_form.fw = fw.clone();
+        self.decrypt_form.fw = fw;
         self.decrypt_form.use_manual_key = false;
         self.page_id = BloomPage::Decrypt.id();
-        self.toast
-            .show_message(ctx, format!("Loaded {fw} into Decrypt"), 2.2);
+        self.toast.show_message(ctx, "Loaded", 1.8);
     }
 
     fn show_snackbar_with_action(
@@ -375,139 +345,30 @@ impl BloomApp {
         self.snackbar.show_message(ctx, msg, action_label);
     }
 
-    fn render_changelog_bottom_sheet(&mut self, ctx: &egui::Context) {
-        let Some(selected) = self.selected_changelog.clone() else {
-            self.changelog_sheet_open = false;
-            return;
-        };
-        if !self.changelog_sheet_open {
-            return;
-        }
-
-        let theme = theme_from_ctx(ctx);
-        let p = &theme.palette;
-        let is_busy = self.shared.lock().map(|g| g.is_busy()).unwrap_or(false);
-        let mut load_clicked = false;
-        let title = format!("Changelog — {}", selected.item.build);
-
-        OneUiBottomSheet::new("changelog_detail_sheet", &title)
-            .max_width(640.0)
-            .max_height(500.0)
-            .show(ctx, &mut self.changelog_sheet_open, |ui| {
-                ui.spacing_mut().item_spacing.y = 10.0;
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                    pill_tag(
-                        ui,
-                        &format!("{} ({})", selected.model, selected.region),
-                        p.selected_bg,
-                        p.primary_high,
-                    );
-                    if let Some(ref os) = selected.item.android_version {
-                        pill_tag(
-                            ui,
-                            &format_android_label(Some(os)),
-                            p.tone_on_tone,
-                            p.text_primary,
-                        );
-                    }
-                    if let Some(ref date) = selected.item.date {
-                        pill_tag(
-                            ui,
-                            &format!("Released {date}"),
-                            p.tone_on_tone,
-                            p.text_secondary,
-                        );
-                    }
-                    if let Some(ref patch) = selected
-                        .item
-                        .changelog
-                        .as_ref()
-                        .and_then(|c| c.sec_patch.as_ref())
-                    {
-                        pill_tag(
-                            ui,
-                            &format!("Patch {patch}"),
-                            p.tone_on_tone,
-                            p.text_secondary,
-                        );
-                    }
-                });
-
-                ui.label(
-                    RichText::new(&selected.item.firmware)
-                        .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
-                        .color(p.text_muted),
-                );
-
-                Frame::NONE
-                    .fill(p.surface_container)
-                    .corner_radius(egui::CornerRadius::same(16))
-                    .inner_margin(Margin::symmetric(14, 12))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width().max(120.0));
-                        let notes = selected
-                            .item
-                            .changelog
-                            .as_ref()
-                            .and_then(|c| c.notes.as_deref())
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or("No detailed release notes provided for this build.");
-                        ui.label(
-                            RichText::new(notes)
-                                .font(font_id(ui, 14.0, OneUiFontWeight::Regular))
-                                .color(p.text_primary),
-                        );
-                    });
-
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
-                    if ui
-                        .add(
-                            OneUiButton::contained_primary("Use in Decrypt")
-                                .icon(OneUiIcon::Shield)
-                                .enabled(!is_busy),
-                        )
-                        .clicked()
-                    {
-                        load_clicked = true;
-                    }
-                    if ui
-                        .add(OneUiButton::outline("Copy Build").icon(OneUiIcon::Copy))
-                        .clicked()
-                    {
-                        ui.ctx().copy_text(selected.item.firmware.clone());
-                        self.toast
-                            .show_message(ui.ctx(), "Firmware string copied", 2.0);
-                    }
-                });
-            });
-
-        if load_clicked {
-            self.changelog_sheet_open = false;
-            self.load_build_into_decrypt(
-                selected.model,
-                selected.region,
-                selected.item.firmware,
-                ctx,
-            );
-        }
-    }
-
     fn render_licenses_bottom_sheet(&mut self, ctx: &egui::Context, theme: &OneUiTheme) {
-        OneUiBottomSheet::new("bloom_licenses_sheet", "Engine & Open Source Credits").show(
+        OneUiBottomSheet::new("bloom_licenses_sheet", "Open Source").show(
             ctx,
             &mut self.licenses_sheet_open,
             |ui| {
                 CardSection::new()
                     .fill(theme.palette.surface_container)
                     .show(ui, |ui| {
-                        ui.add(CardItem::new("bloom-core").summary("Samsung FUS Modern/Legacy protocol, SmartHistory, Galaxy catalog & parallel AES decrypt"));
-                        ui.add(CardItem::new("OneUI-Crate (egui-oneui v0.1.2)").summary("Samsung One UI 9 (SESL9) tokens, floating drawers, AppBar scaffold & widgets").top_divider(true));
-                        ui.add(CardItem::new("emilk/egui & eframe 0.37.0").summary("MIT / Apache-2.0 — Immediate-mode Rust GUI framework").top_divider(true));
-                        ui.add(CardItem::new("resvg 0.50.0 & Roboto Flex").summary("MPL-2.0 / SIL OFL 1.1 — HiDPI One UI SVG icons & variable font").top_divider(true));
+                        ui.add(CardItem::new("bloom-core").summary("FUS, catalog & AES decrypt"));
+                        ui.add(
+                            CardItem::new("egui-oneui v0.1.2")
+                                .summary("One UI 9 (SESL9) widgets")
+                                .top_divider(true),
+                        );
+                        ui.add(
+                            CardItem::new("egui & eframe 0.37")
+                                .summary("MIT / Apache-2.0")
+                                .top_divider(true),
+                        );
+                        ui.add(
+                            CardItem::new("resvg & Roboto Flex")
+                                .summary("MPL-2.0 / OFL 1.1")
+                                .top_divider(true),
+                        );
                     });
             },
         );
@@ -522,7 +383,7 @@ impl eframe::App for BloomApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let pending_snack = if let Ok(mut g) = self.shared.lock() {
             if let Some(msg) = g.pending_toast.take() {
-                self.toast.show_message(ui.ctx(), msg, 2.8);
+                self.toast.show_message(ui.ctx(), msg, 2.4);
             }
             g.pending_snack.take()
         } else {
@@ -545,13 +406,9 @@ impl eframe::App for BloomApp {
         let theme = theme_from_ui(ui);
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (is_busy, db_syncing, csc_hint) = match self.shared.lock() {
-            Ok(g) => (
-                g.is_busy(),
-                g.device_db_syncing,
-                self.config.csc.trim().to_ascii_uppercase(),
-            ),
-            Err(_) => (false, false, String::new()),
+        let (is_busy, db_syncing) = match self.shared.lock() {
+            Ok(g) => (g.is_busy(), g.device_db_syncing),
+            Err(_) => (false, false),
         };
 
         if is_busy || db_syncing {
@@ -559,32 +416,11 @@ impl eframe::App for BloomApp {
                 .request_repaint_after(Duration::from_millis(120));
         }
 
-        let csc_entry = if !csc_hint.is_empty() && csc_hint.len() <= 4 {
-            DrawerEntry::with_badge(
-                BloomPage::Csc.id(),
-                BloomPage::Csc.title(),
-                BloomPage::Csc.icon(),
-                &csc_hint,
-            )
-        } else {
-            DrawerEntry::item(
-                BloomPage::Csc.id(),
-                BloomPage::Csc.title(),
-                BloomPage::Csc.icon(),
-            )
-        };
-
         let entries = [
-            DrawerEntry::SectionLabel("FIRMWARE"),
             DrawerEntry::item(
                 BloomPage::MyDevices.id(),
                 BloomPage::MyDevices.title(),
                 BloomPage::MyDevices.icon(),
-            ),
-            DrawerEntry::item(
-                BloomPage::History.id(),
-                BloomPage::History.title(),
-                BloomPage::History.icon(),
             ),
             DrawerEntry::item(
                 BloomPage::Decrypt.id(),
@@ -592,8 +428,6 @@ impl eframe::App for BloomApp {
                 BloomPage::Decrypt.icon(),
             ),
             DrawerEntry::DottedDivider,
-            DrawerEntry::SectionLabel("TOOLS"),
-            csc_entry,
             DrawerEntry::item(
                 BloomPage::Settings.id(),
                 BloomPage::Settings.title(),
@@ -613,6 +447,14 @@ impl eframe::App for BloomApp {
         );
 
         let current_page = BloomPage::from_id(self.page_id);
+        if cfg!(windows) && current_page == BloomPage::MyDevices {
+            if self.last_usb_scan.elapsed() >= Duration::from_secs(3) {
+                self.last_usb_scan = Instant::now();
+                spawn_scan_usb_devices(&self.rt, Arc::clone(&self.shared), ui.ctx().clone());
+            }
+            ui.ctx().request_repaint_after(Duration::from_secs(3));
+        }
+
         let has_floating_bar = current_page == BloomPage::Decrypt;
         self.snackbar
             .set_bottom_offset(if has_floating_bar { 88.0 } else { 24.0 });
@@ -630,9 +472,7 @@ impl eframe::App for BloomApp {
                         |ui| {
                             match current_page {
                                 BloomPage::MyDevices => self.render_my_devices_page(ui),
-                                BloomPage::History => self.render_history_page(ui),
                                 BloomPage::Decrypt => self.render_decrypt_page(ui),
-                                BloomPage::Csc => self.render_csc_page(ui),
                                 BloomPage::Settings => self.render_settings_page(ui),
                                 BloomPage::About => self.render_about_page(ui),
                             }
@@ -652,7 +492,7 @@ impl eframe::App for BloomApp {
                         Id::unique("bloom_decrypt_div_bar"),
                         |ui| {
                             let items = [
-                                DividerButtonItem::new("Sync Info")
+                                DividerButtonItem::new("Sync")
                                     .icon(OneUiIcon::Refresh)
                                     .enabled(!is_busy),
                                 DividerButtonItem::new("Decrypt")
@@ -665,7 +505,7 @@ impl eframe::App for BloomApp {
                     );
                     if let Some(idx) = dec_action {
                         if idx == 0 {
-                            self.sync_decrypt_from_download(ui.ctx());
+                            self.sync_decrypt_from_selection(ui.ctx());
                         } else {
                             self.trigger_decrypt(ui.ctx());
                         }
@@ -691,14 +531,13 @@ impl eframe::App for BloomApp {
         {
             self.config.set_accent_color(accent);
             self.sync_theme(ui.ctx());
-            self.toast
-                .show_message(ui.ctx(), "Accent color updated", 2.0);
+            self.toast.show_message(ui.ctx(), "Updated", 1.8);
         }
         self.color_dialog_draft = draft;
 
         // Reset confirmation dialog with Undo SnackBar support
-        if let Some(idx) = OneUiDialog::new("bloom_reset_dialog", "Reset preferences?")
-            .body("Restores default transfer limits, output folder, and One UI 9 theme settings.")
+        if let Some(idx) = OneUiDialog::new("bloom_reset_dialog", "Reset settings?")
+            .body("Restore defaults?")
             .action(DialogAction::cancel("Cancel"))
             .action(DialogAction::destructive("Reset"))
             .show(ui.ctx(), &mut self.reset_dialog_open, |_| {})
@@ -710,15 +549,14 @@ impl eframe::App for BloomApp {
                 self.apply_typography(ui.ctx());
                 self.show_snackbar_with_action(
                     ui.ctx(),
-                    "Preferences reset to defaults",
+                    "Reset",
                     Some("Undo"),
                     SnackAction::RestoreConfig(Box::new(prev)),
                 );
             }
         }
 
-        // Official changelog & licenses bottom sheets
-        self.render_changelog_bottom_sheet(ui.ctx());
+        // Open source licenses bottom sheet
         self.render_licenses_bottom_sheet(ui.ctx(), &theme);
 
         // Suggestive SnackBar & Pill Toast overlays
@@ -731,18 +569,14 @@ impl eframe::App for BloomApp {
             match action {
                 SnackAction::OpenFolder(path) => {
                     if let Err(err) = state::open_folder_in_os(&path) {
-                        self.toast.show_message(
-                            ui.ctx(),
-                            format!("Could not open folder: {err}"),
-                            2.4,
-                        );
+                        self.toast.show_message(ui.ctx(), format!("{err}"), 2.4);
                     }
                 }
                 SnackAction::RestoreConfig(prev) => {
                     self.config = *prev;
                     self.sync_theme(ui.ctx());
                     self.apply_typography(ui.ctx());
-                    self.toast.show_message(ui.ctx(), "Preferences restored", 2.0);
+                    self.toast.show_message(ui.ctx(), "Restored", 1.8);
                 }
             }
         }

@@ -110,24 +110,17 @@ pub fn model_csc_inputs(
     let mut changed = false;
     if ui.available_width() >= 520.0 {
         ui.columns(2, |cols| {
-            if labeled_text_field(
-                &mut cols[0],
-                "Device Model",
-                model,
-                "e.g. SM-S928B",
-                None,
-                enabled,
-            )
-            .changed()
+            if labeled_text_field(&mut cols[0], "Model", model, "SM-S921B", None, enabled)
+                .changed()
             {
                 model.make_ascii_uppercase();
                 changed = true;
             }
             if labeled_text_field(
                 &mut cols[1],
-                "CSC Region",
+                "CSC",
                 csc,
-                "e.g. XID, EUX, INS",
+                "EUX",
                 csc_caption,
                 enabled,
             )
@@ -138,20 +131,11 @@ pub fn model_csc_inputs(
             }
         });
     } else {
-        if labeled_text_field(ui, "Device Model", model, "e.g. SM-S928B", None, enabled).changed() {
+        if labeled_text_field(ui, "Model", model, "SM-S921B", None, enabled).changed() {
             model.make_ascii_uppercase();
             changed = true;
         }
-        if labeled_text_field(
-            ui,
-            "CSC Region",
-            csc,
-            "e.g. XID, EUX, INS",
-            csc_caption,
-            enabled,
-        )
-        .changed()
-        {
+        if labeled_text_field(ui, "CSC", csc, "EUX", csc_caption, enabled).changed() {
             csc.make_ascii_uppercase();
             changed = true;
         }
