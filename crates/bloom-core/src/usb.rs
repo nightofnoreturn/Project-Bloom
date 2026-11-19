@@ -34,6 +34,32 @@ pub fn parse_usb_serial_from_pnp_id(pnp_id: &str) -> Option<String> {
     Some(seg.to_ascii_uppercase())
 }
 
+/// Converts a WPD interface path (`\\?\usb#vid_...#instance#{guid}`) into a Windows PnP
+/// device instance ID (`USB\VID_...\INSTANCE`).
+pub fn pnp_interface_path_to_instance_id(pnp_path: &str) -> Option<String> {
+    let trimmed = pnp_path
+        .trim()
+        .trim_start_matches(r"\\?\")
+        .trim_start_matches(r"\\.\");
+    let mut parts = trimmed.split('#');
+    let bus = parts.next()?.trim();
+    let hw = parts.next()?.trim();
+    let inst = parts.next()?.trim();
+    if bus.is_empty() || hw.is_empty() || inst.is_empty() {
+        return None;
+    }
+    Some(format!("{bus}\\{hw}\\{inst}").to_ascii_uppercase())
+}
+
+/// Extracts the USB serial segment from a Windows PnP device instance ID (`USB\VID_...\SERIAL`).
+pub fn parse_usb_serial_from_instance_id(instance_id: &str) -> Option<String> {
+    let seg = instance_id.trim().split('\\').nth(2)?.trim();
+    if seg.is_empty() || seg.contains('&') {
+        return None;
+    }
+    Some(seg.to_ascii_uppercase())
+}
+
 /// Identifies Samsung mobile devices from WPD manufacturer, model code, or USB VID (`04E8`).
 pub fn is_samsung_device(manufacturer: &str, model: &str, pnp_id: &str) -> bool {
     let mfg = manufacturer.trim().to_ascii_lowercase();
@@ -67,7 +93,10 @@ mod win_wpd {
     use std::ffi::c_void;
     use std::ptr::{null, null_mut};
 
-    use super::{is_samsung_device, parse_usb_serial_from_pnp_id, ConnectedSamsungDevice};
+    use super::{
+        is_samsung_device, parse_usb_serial_from_instance_id, parse_usb_serial_from_pnp_id,
+        pnp_interface_path_to_instance_id, ConnectedSamsungDevice,
+    };
 
     const COINIT_MULTITHREADED: u32 = 0x0;
     const CLSCTX_INPROC_SERVER: u32 = 0x1;
@@ -152,6 +181,19 @@ mod win_wpd {
         ) -> i32;
         fn CoTaskMemFree(pv: *mut c_void);
         fn PropVariantClear(pvar: *mut PropVariant) -> i32;
+    }
+
+    #[link(name = "cfgmgr32")]
+    extern "system" {
+        fn CM_Locate_DevNodeW(pdn_dev_inst: *mut u32, p_device_id: *const u16, ul_flags: u32)
+            -> u32;
+        fn CM_Get_Parent(pdn_dev_inst: *mut u32, dn_dev_inst: u32, ul_flags: u32) -> u32;
+        fn CM_Get_Device_IDW(
+            dn_dev_inst: u32,
+            buffer: *mut u16,
+            buffer_len: u32,
+            ul_flags: u32,
+        ) -> u32;
     }
 
     struct ComGuard {
@@ -425,6 +467,9 @@ mod win_wpd {
                 return None;
             }
 
+            let usb_serial =
+                parse_usb_serial_from_pnp_id(pnp_id).or_else(|| resolve_parent_usb_serial(pnp_id));
+
             Some(ConnectedSamsungDevice {
                 device_id: pnp_id.to_owned(),
                 friendly_name,
@@ -433,9 +478,37 @@ mod win_wpd {
                 firmware_build,
                 battery_percent,
                 serial,
-                usb_serial: parse_usb_serial_from_pnp_id(pnp_id),
+                usb_serial,
             })
         }
+    }
+
+    fn resolve_parent_usb_serial(pnp_interface_path: &str) -> Option<String> {
+        let inst = pnp_interface_path_to_instance_id(pnp_interface_path)?;
+        let wide_inst = to_wide_null(&inst);
+        let mut dev_inst: u32 = 0;
+        let cr = unsafe { CM_Locate_DevNodeW(&mut dev_inst, wide_inst.as_ptr(), 0) };
+        if cr != 0 {
+            return None;
+        }
+
+        let mut cur = dev_inst;
+        for _ in 0..3 {
+            let mut parent: u32 = 0;
+            if unsafe { CM_Get_Parent(&mut parent, cur, 0) } != 0 {
+                break;
+            }
+            let mut buf = [0u16; 512];
+            if unsafe { CM_Get_Device_IDW(parent, buf.as_mut_ptr(), buf.len() as u32, 0) } == 0 {
+                let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                let parent_id = String::from_utf16_lossy(&buf[..end]);
+                if let Some(sn) = parse_usb_serial_from_instance_id(&parent_id) {
+                    return Some(sn);
+                }
+            }
+            cur = parent;
+        }
+        None
     }
 }
 
@@ -451,8 +524,20 @@ mod tests {
             Some("RRGYC063QZR")
         );
 
-        let composite = r"\\?\usb#vid_04e8&pid_6860#6&12ab34cd&0&2#{6ac27878-a6fa-4155-ba85-f98f491d4f33}";
+        let composite = r"\\?\usb#vid_04e8&pid_6860&ms_comp_mtp&samsung_android#7&308dbb24&1&0000#{6ac27878-a6fa-4155-ba85-f98f491d4f33}";
         assert_eq!(parse_usb_serial_from_pnp_id(composite), None);
+        assert_eq!(
+            pnp_interface_path_to_instance_id(composite).as_deref(),
+            Some(r"USB\VID_04E8&PID_6860&MS_COMP_MTP&SAMSUNG_ANDROID\7&308DBB24&1&0000")
+        );
+        assert_eq!(
+            parse_usb_serial_from_instance_id(r"USB\VID_04E8&PID_6860\rrgyc063qzr").as_deref(),
+            Some("RRGYC063QZR")
+        );
+        assert_eq!(
+            parse_usb_serial_from_instance_id(r"USB\VID_04E8&PID_6860\7&308DBB24&1&0000"),
+            None
+        );
     }
 
     #[test]

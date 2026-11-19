@@ -18,21 +18,12 @@ enum SplashHeroState {
     Fallback,
 }
 
-fn paint_official_render_hero(
-    ui: &mut Ui,
-    p: &TwoUiPalette,
-    texture: &egui::TextureHandle,
-) {
+fn paint_official_render_hero(ui: &mut Ui, texture: &egui::TextureHandle) {
     let box_size = vec2(210.0, 210.0);
     let (outer, _) = ui.allocate_exact_size(box_size, Sense::hover());
     if !ui.is_rect_visible(outer) {
         return;
     }
-
-    let painter = ui.painter();
-    let center = outer.center();
-    painter.circle_filled(center, 78.0, p.primary.gamma_multiply(0.08));
-    painter.circle_filled(center, 52.0, p.primary.gamma_multiply(0.14));
 
     let tex_sz = texture.size_vec2();
     let draw_size = if tex_sz.x > 0.0 && tex_sz.y > 0.0 {
@@ -41,20 +32,15 @@ fn paint_official_render_hero(
     } else {
         vec2(180.0, 180.0)
     };
-    let draw_rect = Rect::from_center_size(center, draw_size);
+    let draw_rect = Rect::from_center_size(outer.center(), draw_size);
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-    painter.image(texture.id(), draw_rect, uv, Color32::WHITE);
+    ui.painter()
+        .image(texture.id(), draw_rect, uv, Color32::WHITE);
 }
 
-fn paint_loading_splash_hero(ui: &mut Ui, p: &TwoUiPalette) {
+fn paint_loading_splash_hero(ui: &mut Ui) {
     let box_size = vec2(210.0, 210.0);
     let (outer, _) = ui.allocate_exact_size(box_size, Sense::hover());
-    if ui.is_rect_visible(outer) {
-        let painter = ui.painter();
-        let center = outer.center();
-        painter.circle_filled(center, 66.0, p.primary.gamma_multiply(0.08));
-        painter.circle_filled(center, 44.0, p.primary.gamma_multiply(0.14));
-    }
     let spinner_rect = Rect::from_center_size(outer.center(), vec2(36.0, 36.0));
     ui.put(spinner_rect, TwoUiSpinner::indeterminate(SpinnerSize::Medium));
 }
@@ -73,10 +59,6 @@ fn paint_galaxy_splash_hero(
 
     let painter = ui.painter();
     let center = outer.center();
-
-    // Ambient One UI splash halo behind chassis
-    painter.circle_filled(center, 66.0, p.primary.gamma_multiply(0.08));
-    painter.circle_filled(center, 44.0, p.primary.gamma_multiply(0.14));
 
     // Rounded Galaxy chassis (`116 x 204`)
     let chassis = Rect::from_center_size(center, vec2(116.0, 204.0));
@@ -285,10 +267,10 @@ impl BloomApp {
                     ui.spacing_mut().item_spacing.y = 10.0;
                     match &hero_state {
                         SplashHeroState::Texture(tex) => {
-                            paint_official_render_hero(ui, p, tex);
+                            paint_official_render_hero(ui, tex);
                         }
                         SplashHeroState::Loading => {
-                            paint_loading_splash_hero(ui, p);
+                            paint_loading_splash_hero(ui);
                         }
                         SplashHeroState::Fallback => {
                             paint_galaxy_splash_hero(ui, &theme, build_tail);

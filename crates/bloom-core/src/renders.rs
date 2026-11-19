@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::devices::default_device_cache_path;
 
 const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+const RENDER_INDEX_VERSION: u32 = 2;
 const RENDER_INDEX_TTL_SECS: u64 = 86_400;
 
 /// Neutral multi-region Samsung public product finder feeds (`siteCode`, `type`).
@@ -23,6 +24,8 @@ const FINDER_SOURCES: &[(&str, &str)] = &[
 /// Cached mapping from Samsung model codes/families (`SM-S921B`, `SM-S921`) to official CDN URLs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviceRenderIndex {
+    #[serde(default)]
+    pub version: u32,
     pub synced_at_unix: u64,
     pub urls: HashMap<String, String>,
 }
@@ -58,6 +61,17 @@ struct FinderProduct {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+struct FinderChip {
+    #[serde(rename = "fmyChipType")]
+    fmy_chip_type: Option<String>,
+    #[serde(rename = "fmyChipName")]
+    fmy_chip_name: Option<String>,
+    #[serde(rename = "fmyChipLocalName")]
+    fmy_chip_local_name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct FinderModel {
     #[serde(rename = "modelCode")]
     model_code: Option<String>,
@@ -67,6 +81,8 @@ struct FinderModel {
     thumb_url: Option<String>,
     #[serde(rename = "largeUrl")]
     large_url: Option<String>,
+    #[serde(rename = "fmyChipList")]
+    fmy_chip_list: Vec<FinderChip>,
 }
 
 /// Strips `/DS`-style suffixes and normalizes a Samsung model code (e.g. `SM-S921B/DS` -> `SM-S921B`).
@@ -91,7 +107,7 @@ pub fn model_family_key(model: &str) -> String {
     }
 }
 
-/// Normalizes Samsung Scene7 (`//images.samsung.com/...`) render URLs into `$624_624_PNG$` requests.
+/// Normalizes Samsung Scene7 (`//images.samsung.com/...`) render URLs into lightweight `$264_264_PNG$` requests.
 pub fn normalize_samsung_render_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -108,20 +124,87 @@ pub fn normalize_samsung_render_url(raw: &str) -> Option<String> {
     if with_scheme.contains('?') {
         Some(with_scheme)
     } else {
-        Some(format!("{with_scheme}?$624_624_PNG$"))
+        Some(format!("{with_scheme}?$264_264_PNG$"))
     }
 }
 
-fn is_special_edition(name: &str) -> bool {
+fn edition_rank(name: &str) -> u8 {
     let lower = name.to_ascii_lowercase();
-    lower.contains("re-newed")
-        || lower.contains("renewed")
-        || lower.contains("online exclusive")
-        || lower.contains("samsung.com only")
+    if lower.contains("re-newed") || lower.contains("renewed") {
+        2
+    } else if lower.contains("online exclusive") || lower.contains("samsung.com only") {
+        1
+    } else {
+        0
+    }
 }
 
-/// Extracts a `model -> transparent PNG URL` table from Samsung `finder/newhybris` JSON.
-pub fn parse_finder_render_urls(json_text: &str) -> HashMap<String, String> {
+fn color_rank(chips: &[FinderChip]) -> u8 {
+    for chip in chips {
+        if !chip
+            .fmy_chip_type
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("COLOR"))
+        {
+            continue;
+        }
+        let color_name = format!(
+            "{} {}",
+            chip.fmy_chip_name.as_deref().unwrap_or(""),
+            chip.fmy_chip_local_name.as_deref().unwrap_or("")
+        )
+        .to_ascii_lowercase();
+
+        if color_name.contains("black")
+            || color_name.contains("onyx")
+            || color_name.contains("obsidian")
+            || color_name.contains("graphite")
+            || color_name.contains("jetblack")
+        {
+            return 0;
+        }
+        if color_name.contains("gray")
+            || color_name.contains("grey")
+            || color_name.contains("titanium")
+            || color_name.contains("silver")
+            || color_name.contains("slate")
+            || color_name.contains("shadow")
+        {
+            return 1;
+        }
+        if color_name.contains("white")
+            || color_name.contains("cream")
+            || color_name.contains("navy")
+            || color_name.contains("blue")
+        {
+            return 2;
+        }
+        return 3;
+    }
+    2
+}
+
+fn insert_best_render(
+    best: &mut HashMap<String, ((u8, u8), String)>,
+    key: String,
+    score: (u8, u8),
+    url: String,
+) {
+    if key.is_empty() {
+        return;
+    }
+    match best.get_mut(&key) {
+        Some(entry) if score < entry.0 => {
+            *entry = (score, url);
+        }
+        None => {
+            best.insert(key, (score, url));
+        }
+        _ => {}
+    }
+}
+
+fn parse_finder_render_scored(json_text: &str) -> HashMap<String, ((u8, u8), String)> {
     let Ok(parsed) = serde_json::from_str::<FinderEnvelope>(json_text) else {
         return HashMap::new();
     };
@@ -131,16 +214,10 @@ pub fn parse_finder_render_urls(json_text: &str) -> HashMap<String, String> {
         .map(|d| d.product_list)
         .unwrap_or_default();
 
-    let mut retail: HashMap<String, String> = HashMap::new();
-    let mut special: HashMap<String, String> = HashMap::new();
+    let mut best: HashMap<String, ((u8, u8), String)> = HashMap::new();
 
     for prod in products {
-        let name = prod.fmy_marketing_name.as_deref().unwrap_or("");
-        let target = if is_special_edition(name) {
-            &mut special
-        } else {
-            &mut retail
-        };
+        let ed_rank = edition_rank(prod.fmy_marketing_name.as_deref().unwrap_or(""));
 
         for m in prod.model_list {
             let raw_url = m
@@ -161,19 +238,24 @@ pub fn parse_finder_render_urls(json_text: &str) -> HashMap<String, String> {
                 continue;
             };
 
+            let score = (ed_rank, color_rank(&m.fmy_chip_list));
             let exact = clean_model_code(raw_model);
             let family = model_family_key(&exact);
-            if !exact.is_empty() {
-                target.entry(exact).or_insert_with(|| url.clone());
-            }
-            if !family.is_empty() {
-                target.entry(family).or_insert(url);
-            }
+            insert_best_render(&mut best, exact, score, url.clone());
+            insert_best_render(&mut best, family, score, url);
         }
     }
 
-    special.extend(retail);
-    special
+    best
+}
+
+/// Extracts a `model -> transparent PNG URL` table from Samsung `finder/newhybris` JSON,
+/// prioritizing retail units in neutral dark finishes.
+pub fn parse_finder_render_urls(json_text: &str) -> HashMap<String, String> {
+    parse_finder_render_scored(json_text)
+        .into_iter()
+        .map(|(k, (_, url))| (k, url))
+        .collect()
 }
 
 /// Per-user cache directory for downloaded Samsung device renders (`%APPDATA%\Bloom\renders`).
@@ -185,7 +267,7 @@ pub fn default_render_cache_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("renders"))
 }
 
-/// Returns the local PNG path used to cache the render for `model`.
+/// Returns the local PNG path used to cache the mini `$264_264_PNG$` render for `model`.
 pub fn cached_render_png_path(cache_dir: &Path, model: &str) -> PathBuf {
     let key = model_family_key(model);
     let safe: String = key
@@ -199,7 +281,7 @@ pub fn cached_render_png_path(cache_dir: &Path, model: &str) -> PathBuf {
         })
         .collect();
     let name = if safe.is_empty() { "device" } else { &safe };
-    cache_dir.join(format!("{name}.png"))
+    cache_dir.join(format!("{name}_264.png"))
 }
 
 /// Deletes the cached render URL index so the next lookup refreshes from Samsung.
@@ -244,14 +326,15 @@ pub async fn fetch_or_load_device_render_png(model: &str, cache_dir: &Path) -> O
     }
 
     let png_path = cached_render_png_path(cache_dir, &exact);
-    if let Ok(cached) = std::fs::read(&png_path).map(|b| b.starts_with(PNG_MAGIC).then_some(b)) {
-        if let Some(bytes) = cached {
-            return Some(bytes);
-        }
+    if let Ok(Some(bytes)) = std::fs::read(&png_path).map(|b| b.starts_with(PNG_MAGIC).then_some(b))
+    {
+        return Some(bytes);
     }
 
     let index_path = cache_dir.join("render_index.json");
-    let mut index = load_render_index(&index_path).unwrap_or_default();
+    let mut index = load_render_index(&index_path)
+        .filter(|idx| idx.version == RENDER_INDEX_VERSION)
+        .unwrap_or_default();
     let mut resolved_url = index
         .urls
         .get(&exact)
@@ -265,7 +348,8 @@ pub async fn fetch_or_load_device_render_png(model: &str, cache_dir: &Path) -> O
         .ok()?;
 
     let now = now_unix_secs();
-    let index_stale = index.urls.is_empty() || now.saturating_sub(index.synced_at_unix) >= RENDER_INDEX_TTL_SECS;
+    let index_stale =
+        index.urls.is_empty() || now.saturating_sub(index.synced_at_unix) >= RENDER_INDEX_TTL_SECS;
 
     if resolved_url.is_none() && index_stale {
         let fetches = FINDER_SOURCES.iter().map(|&(site, cat)| {
@@ -279,22 +363,26 @@ pub async fn fetch_or_load_device_render_png(model: &str, cache_dir: &Path) -> O
                     return None;
                 }
                 let text = resp.text().await.ok()?;
-                Some(parse_finder_render_urls(&text))
+                Some(parse_finder_render_scored(&text))
             }
         });
 
         let maps = join_all(fetches).await;
-        let mut merged = HashMap::new();
+        let mut best_merged: HashMap<String, ((u8, u8), String)> = HashMap::new();
         for map in maps.into_iter().flatten() {
-            for (k, v) in map {
-                merged.entry(k).or_insert(v);
+            for (k, (score, url)) in map {
+                insert_best_render(&mut best_merged, k, score, url);
             }
         }
 
-        if !merged.is_empty() {
+        if !best_merged.is_empty() {
             index = DeviceRenderIndex {
+                version: RENDER_INDEX_VERSION,
                 synced_at_unix: now,
-                urls: merged,
+                urls: best_merged
+                    .into_iter()
+                    .map(|(k, (_, url))| (k, url))
+                    .collect(),
             };
             if let Ok(json) = serde_json::to_vec(&index) {
                 save_bytes_atomic(&index_path, &json);
@@ -337,13 +425,13 @@ mod tests {
                 "//images.samsung.com/is/image/samsung/p6pim/id/2401/gallery/s24-thumb-123"
             )
             .as_deref(),
-            Some("https://images.samsung.com/is/image/samsung/p6pim/id/2401/gallery/s24-thumb-123?$624_624_PNG$")
+            Some("https://images.samsung.com/is/image/samsung/p6pim/id/2401/gallery/s24-thumb-123?$264_264_PNG$")
         );
         assert_eq!(normalize_samsung_render_url(""), None);
     }
 
     #[test]
-    fn parses_samsung_finder_json_and_prefers_retail_renders() {
+    fn parses_samsung_finder_json_and_prefers_neutral_dark_retail_renders() {
         let json = r#"{
           "response": {
             "statusCode": 200,
@@ -355,7 +443,10 @@ mod tests {
                     {
                       "modelCode": "SM5S921BZKDEUB",
                       "modelName": "SM-S921B/DS",
-                      "thumbUrl": "//images.samsung.com/is/image/samsung/renewed-s24"
+                      "thumbUrl": "//images.samsung.com/is/image/samsung/renewed-s24",
+                      "fmyChipList": [
+                        { "fmyChipType": "COLOR", "fmyChipName": "onyx black", "fmyChipLocalName": "Onyx Black" }
+                      ]
                     }
                   ]
                 },
@@ -365,7 +456,18 @@ mod tests {
                     {
                       "modelCode": "SM-S921BZYQXID",
                       "modelName": "SM-S921B/DS",
-                      "thumbUrl": "//images.samsung.com/is/image/samsung/retail-s24"
+                      "thumbUrl": "//images.samsung.com/is/image/samsung/yellow-s24",
+                      "fmyChipList": [
+                        { "fmyChipType": "COLOR", "fmyChipName": "amber yellow", "fmyChipLocalName": "Amber Yellow" }
+                      ]
+                    },
+                    {
+                      "modelCode": "SM-S921BZKCXID",
+                      "modelName": "SM-S921B/DS",
+                      "thumbUrl": "//images.samsung.com/is/image/samsung/black-s24",
+                      "fmyChipList": [
+                        { "fmyChipType": "COLOR", "fmyChipName": "onyx black", "fmyChipLocalName": "Onyx Black" }
+                      ]
                     }
                   ]
                 }
@@ -375,7 +477,7 @@ mod tests {
         }"#;
 
         let map = parse_finder_render_urls(json);
-        let expected = "https://images.samsung.com/is/image/samsung/retail-s24?$624_624_PNG$";
+        let expected = "https://images.samsung.com/is/image/samsung/black-s24?$264_264_PNG$";
         assert_eq!(map.get("SM-S921B").map(String::as_str), Some(expected));
         assert_eq!(map.get("SM-S921").map(String::as_str), Some(expected));
     }
