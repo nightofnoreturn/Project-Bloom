@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use egui::{Frame, Margin, RichText, Ui};
-use egui_oneui::prelude::*;
+use egui_twoui::prelude::*;
 
 use crate::state::{derive_decrypted_output, format_bytes, format_eta, open_folder_in_os};
 use crate::widgets::{
@@ -25,7 +25,7 @@ impl BloomApp {
         let p = &theme.palette;
 
         if let Some(err) = error_message.as_deref() {
-            status_banner(ui, OneUiIcon::Info, p.functional_red, "Failed", Some(err));
+            status_banner(ui, TwoUiIcon::Info, p.functional_red, "Failed", Some(err));
             ui.add_space(10.0);
         }
 
@@ -43,7 +43,7 @@ impl BloomApp {
                 if ui
                     .add(
                         CardItem::new("Input")
-                            .icon(OneUiIcon::Shield)
+                            .icon(TwoUiIcon::Shield)
                             .summary(in_summary)
                             .summary_highlight(!self.decrypt_form.input_path.trim().is_empty())
                             .chevron()
@@ -70,7 +70,7 @@ impl BloomApp {
                 if ui
                     .add(
                         CardItem::new("Output")
-                            .icon(OneUiIcon::Apps)
+                            .icon(TwoUiIcon::Apps)
                             .summary(out_summary)
                             .summary_highlight(!self.decrypt_form.output_path.trim().is_empty())
                             .chevron()
@@ -240,7 +240,7 @@ impl BloomApp {
                         ui.horizontal(|ui| {
                             if decrypting {
                                 ui.add(
-                                    OneUiSpinner::determinate(SpinnerSize::Small, frac)
+                                    TwoUiSpinner::determinate(SpinnerSize::Small, frac)
                                         .gradient(true),
                                 );
                                 ui.add_space(8.0);
@@ -251,7 +251,7 @@ impl BloomApp {
                                 } else {
                                     "Complete"
                                 })
-                                .font(font_id(ui, 15.0, OneUiFontWeight::SemiBold))
+                                .font(font_id(ui, 15.0, TwoUiFontWeight::SemiBold))
                                 .color(p.text_primary),
                             );
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -264,7 +264,7 @@ impl BloomApp {
                             });
                         });
                         ui.add(
-                            OneUiProgressBar::determinate(frac)
+                            TwoUiProgressBar::determinate(frac)
                                 .height(8.0)
                                 .gradient(true),
                         );
@@ -276,7 +276,7 @@ impl BloomApp {
                                     format_bytes(cur),
                                     format_bytes(tot)
                                 ))
-                                .font(font_id(ui, 13.5, OneUiFontWeight::Medium))
+                                .font(font_id(ui, 13.5, TwoUiFontWeight::Medium))
                                 .color(p.text_primary),
                             );
                             if bps > 0 {
@@ -287,29 +287,29 @@ impl BloomApp {
                                         format_bytes(bps),
                                         format_eta(rem, bps)
                                     ))
-                                    .font(font_id(ui, 13.5, OneUiFontWeight::Regular))
+                                    .font(font_id(ui, 13.5, TwoUiFontWeight::Regular))
                                     .color(p.text_secondary),
                                 );
                             }
                         });
                     } else if decrypting {
                         ui.horizontal(|ui| {
-                            ui.add(OneUiSpinner::indeterminate(SpinnerSize::Small));
+                            ui.add(TwoUiSpinner::indeterminate(SpinnerSize::Small));
                             ui.add_space(8.0);
                             ui.label("Loading");
                         });
-                        ui.add(OneUiProgressBar::indeterminate().height(8.0));
+                        ui.add(TwoUiProgressBar::indeterminate().height(8.0));
                     }
 
                     if let Some(ref out_path) = last_decrypted_path.filter(|_| !decrypting) {
                         status_banner(
                             ui,
-                            OneUiIcon::Check,
+                            TwoUiIcon::Check,
                             p.functional_green,
                             "Decrypted",
                             Some(&out_path.display().to_string()),
                         );
-                        if ui.add(OneUiButton::primary("Open")).clicked() {
+                        if ui.add(TwoUiButton::primary("Open")).clicked() {
                             if let Err(err) = open_folder_in_os(out_path) {
                                 self.toast.show_message(ui.ctx(), format!("{err}"), 2.4);
                             }

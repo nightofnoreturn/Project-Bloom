@@ -14,7 +14,7 @@ path = "src/main.rs"
 bloom-core = { path = "../bloom-core" }
 eframe.workspace = true
 egui.workspace = true
-egui-oneui.workspace = true
+egui-twoui.workspace = true
 rfd.workspace = true
 serde.workspace = true
 tokio.workspace = true

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use egui::{vec2, Align, Frame, Layout, Margin, RichText, Ui};
-use egui_oneui::prelude::*;
+use egui_twoui::prelude::*;
 
 use crate::state::{format_sync_age, ACCENT_PRESETS};
 use crate::widgets::{labeled_text_field, path_picker_field, status_banner};
@@ -29,9 +29,9 @@ impl BloomApp {
             .inner_margin(Margin::symmetric(0, 6))
             .show(ui, |ui| {
                 let mode_icon = if self.config.dark_mode {
-                    OneUiIcon::Moon
+                    TwoUiIcon::Moon
                 } else {
-                    OneUiIcon::Sun
+                    TwoUiIcon::Sun
                 };
                 let dark_sw = SwitchItem::new(&mut self.config.dark_mode, "Dark mode")
                     .icon(mode_icon)
@@ -64,13 +64,13 @@ impl BloomApp {
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new("Accent")
-                                    .font(font_id(ui, 15.0, OneUiFontWeight::Medium))
+                                    .font(font_id(ui, 15.0, TwoUiFontWeight::Medium))
                                     .color(p.text_primary),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui
                                     .add(
-                                        OneUiButton::primary("Custom").icon(OneUiIcon::Palette),
+                                        TwoUiButton::primary("Custom").icon(TwoUiIcon::Palette),
                                     )
                                     .clicked()
                                 {
@@ -87,11 +87,11 @@ impl BloomApp {
                                 let selected = current_accent == col;
                                 if ui
                                     .add(
-                                        OneUiButton::new(name)
+                                        TwoUiButton::new(name)
                                             .style(if selected {
-                                                OneUiButtonStyle::Primary
+                                                TwoUiButtonStyle::Primary
                                             } else {
-                                                OneUiButtonStyle::Default
+                                                TwoUiButtonStyle::Default
                                             })
                                             .min_size(vec2(96.0, 34.0)),
                                     )
@@ -117,11 +117,11 @@ impl BloomApp {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 RichText::new("Font")
-                                    .font(font_id(ui, 15.0, OneUiFontWeight::Medium))
+                                    .font(font_id(ui, 15.0, TwoUiFontWeight::Medium))
                                     .color(p.text_primary),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if OneUiDropdown::new(
+                                if TwoUiDropdown::new(
                                     "settings_typography_dropdown",
                                     &presets,
                                     &mut self.config.typography_idx,
@@ -148,7 +148,7 @@ impl BloomApp {
                         if let Some(ref err) = db_error {
                             status_banner(
                                 ui,
-                                OneUiIcon::Info,
+                                TwoUiIcon::Info,
                                 p.functional_red,
                                 "Sync failed",
                                 Some(err),
@@ -167,13 +167,13 @@ impl BloomApp {
                                 };
                                 ui.label(
                                     RichText::new(title)
-                                        .font(font_id(ui, 15.0, OneUiFontWeight::Medium))
+                                        .font(font_id(ui, 15.0, TwoUiFontWeight::Medium))
                                         .color(p.text_primary),
                                 );
                                 if !db_syncing {
                                     ui.label(
                                         RichText::new(format_sync_age(synced_at))
-                                            .font(font_id(ui, 13.0, OneUiFontWeight::Regular))
+                                            .font(font_id(ui, 13.0, TwoUiFontWeight::Regular))
                                             .color(p.text_muted),
                                     );
                                 }
@@ -181,11 +181,11 @@ impl BloomApp {
 
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if db_syncing {
-                                    ui.add(OneUiSpinner::indeterminate(SpinnerSize::Small));
+                                    ui.add(TwoUiSpinner::indeterminate(SpinnerSize::Small));
                                 } else if ui
                                     .add(
-                                        OneUiButton::contained_primary("Rebuild")
-                                            .icon(OneUiIcon::Refresh),
+                                        TwoUiButton::contained_primary("Rebuild")
+                                            .icon(TwoUiIcon::Refresh),
                                     )
                                     .clicked()
                                 {
@@ -227,7 +227,7 @@ impl BloomApp {
                         if ui
                             .add_enabled(
                                 !is_busy,
-                                OneUiSeekBarPro::new("Connections", &mut conn_f, 1.0..=32.0)
+                                TwoUiSeekBarPro::new("Connections", &mut conn_f, 1.0..=32.0)
                                     .step(1.0)
                                     .mode(SeekBarMode::Expand)
                                     .end_labels("1", "32"),
@@ -246,7 +246,7 @@ impl BloomApp {
                         if ui
                             .add_enabled(
                                 !is_busy,
-                                OneUiSeekBarPro::new("Speed limit", &mut limit_f, 0.0..=100.0)
+                                TwoUiSeekBarPro::new("Speed limit", &mut limit_f, 0.0..=100.0)
                                     .step(1.0)
                                     .unit(limit_unit)
                                     .mode(SeekBarMode::Expand)
@@ -290,11 +290,11 @@ impl BloomApp {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 RichText::new("Changelog")
-                                    .font(font_id(ui, 15.0, OneUiFontWeight::Medium))
+                                    .font(font_id(ui, 15.0, TwoUiFontWeight::Medium))
                                     .color(p.text_primary),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let _ = OneUiDropdown::new(
+                                let _ = TwoUiDropdown::new(
                                     "settings_changelog_lang_dropdown",
                                     &langs,
                                     &mut self.config.history_lang_idx,
@@ -327,7 +327,7 @@ impl BloomApp {
                 if ui
                     .add(
                         CardItem::new("Reset settings")
-                            .icon(OneUiIcon::Refresh)
+                            .icon(TwoUiIcon::Refresh)
                             .chevron()
                             .enabled(!is_busy),
                     )

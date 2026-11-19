@@ -6,8 +6,8 @@ use egui::{
     pos2, vec2, Align, Color32, CornerRadius, Frame, Margin, Pos2, Rect, RichText, ScrollArea,
     Sense, Stroke, StrokeKind, Ui,
 };
-use egui_oneui::feedback::{interaction_factors, paint_state_overlay, recoil_rect};
-use egui_oneui::prelude::*;
+use egui_twoui::feedback::{interaction_factors, paint_state_overlay, recoil_rect};
+use egui_twoui::prelude::*;
 
 use crate::state::{
     extract_emblem_text, format_firmware_tile_title, format_tile_date, short_build_tail,
@@ -127,7 +127,7 @@ impl BloomApp {
         let p = &theme.palette;
         let has_selected_device = self.selected_my_device.is_some();
 
-        let (search_resp, back_clicked) = OneUiSearchBar::new(&mut self.device_search_query)
+        let (search_resp, back_clicked) = TwoUiSearchBar::new(&mut self.device_search_query)
             .hint("Search")
             .show_back_button(has_selected_device)
             .floating(true)
@@ -149,11 +149,11 @@ impl BloomApp {
         if db_syncing && catalog_len > 0 {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.add(OneUiSpinner::indeterminate(SpinnerSize::Small));
+                ui.add(TwoUiSpinner::indeterminate(SpinnerSize::Small));
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new("Syncing")
-                        .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
+                        .font(font_id(ui, 13.0, TwoUiFontWeight::Medium))
                         .color(p.text_muted),
                 );
             });
@@ -244,7 +244,7 @@ impl BloomApp {
                         pos2(right_edge - 8.0, vis_rect.center().y),
                         vec2(16.0, 16.0),
                     );
-                    OneUiIcon::ChevronRight.paint(ui, chev_rect, p.text_muted);
+                    TwoUiIcon::ChevronRight.paint(ui, chev_rect, p.text_muted);
                     right_edge -= 24.0;
 
                     if let Some(pct) = usb.battery_percent {
@@ -257,7 +257,7 @@ impl BloomApp {
                         };
                         let pct_g = painter.layout_no_wrap(
                             format!("{pct}%"),
-                            font_id(ui, 12.5, OneUiFontWeight::Medium),
+                            font_id(ui, 12.5, TwoUiFontWeight::Medium),
                             p.text_secondary,
                         );
                         let pct_pos = pos2(
@@ -282,7 +282,7 @@ impl BloomApp {
 
                     let title_g = clipped.layout_no_wrap(
                         usb.display_title().to_owned(),
-                        font_id(ui, 15.0, OneUiFontWeight::SemiBold),
+                        font_id(ui, 15.0, TwoUiFontWeight::SemiBold),
                         p.text_primary,
                     );
                     let sub_text = match usb.firmware_build.as_deref() {
@@ -293,7 +293,7 @@ impl BloomApp {
                     };
                     let sub_g = clipped.layout_no_wrap(
                         sub_text,
-                        font_id(ui, 12.5, OneUiFontWeight::Regular),
+                        font_id(ui, 12.5, TwoUiFontWeight::Regular),
                         p.text_muted,
                     );
 
@@ -319,11 +319,11 @@ impl BloomApp {
             if db_syncing {
                 ui.add_space(44.0);
                 ui.vertical_centered(|ui| {
-                    ui.add(OneUiSpinner::indeterminate(SpinnerSize::Large));
+                    ui.add(TwoUiSpinner::indeterminate(SpinnerSize::Large));
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new("Loading")
-                            .font(font_id(ui, 14.5, OneUiFontWeight::Medium))
+                            .font(font_id(ui, 14.5, TwoUiFontWeight::Medium))
                             .color(p.text_muted),
                     );
                 });
@@ -332,9 +332,9 @@ impl BloomApp {
                 }
                 ui.add_space(20.0);
             } else if let Some(ref err) = db_error {
-                status_banner(ui, OneUiIcon::Info, p.functional_red, "Sync failed", Some(err));
+                status_banner(ui, TwoUiIcon::Info, p.functional_red, "Sync failed", Some(err));
                 ui.add_space(10.0);
-                if ui.add(OneUiButton::primary("Retry")).clicked() {
+                if ui.add(TwoUiButton::primary("Retry")).clicked() {
                     self.trigger_sync_galaxy_db(ui.ctx(), false);
                 }
                 ui.add_space(12.0);
@@ -390,7 +390,7 @@ impl BloomApp {
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new("No results")
-                                .font(font_id(ui, 14.5, OneUiFontWeight::Medium))
+                                .font(font_id(ui, 14.5, TwoUiFontWeight::Medium))
                                 .color(p.text_muted),
                         );
                     });
@@ -434,7 +434,7 @@ impl BloomApp {
 
         if total_matches > MAX_DEVICE_LIST_ROWS {
             let cap = format!("{MAX_DEVICE_LIST_ROWS} / {total_matches}");
-            OneUiPreferenceCaption::new(&cap).show(ui);
+            TwoUiPreferenceCaption::new(&cap).show(ui);
         }
 
         if let Some(dev) = picked_device {
@@ -487,7 +487,7 @@ impl BloomApp {
                             }
                             ui.label(
                                 RichText::new(dev.display_label())
-                                    .font(font_id(ui, 15.5, OneUiFontWeight::SemiBold))
+                                    .font(font_id(ui, 15.5, TwoUiFontWeight::SemiBold))
                                     .color(p.text_primary),
                             );
                         });
@@ -495,7 +495,7 @@ impl BloomApp {
                             ui.spacing_mut().item_spacing = vec2(8.0, 4.0);
                             ui.label(
                                 RichText::new(region.region_label())
-                                    .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
+                                    .font(font_id(ui, 13.0, TwoUiFontWeight::Medium))
                                     .color(p.primary_high),
                             );
                             if let Some(ref cur) = installed_build {
@@ -518,7 +518,7 @@ impl BloomApp {
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                         if ui
                             .add(
-                                OneUiButton::outline("Region")
+                                TwoUiButton::outline("Region")
                                     .enabled(!loading)
                                     .min_size(vec2(78.0, 34.0)),
                             )
@@ -535,11 +535,11 @@ impl BloomApp {
         if loading {
             ui.add_space(48.0);
             ui.vertical_centered(|ui| {
-                ui.add(OneUiSpinner::indeterminate(SpinnerSize::Large));
+                ui.add(TwoUiSpinner::indeterminate(SpinnerSize::Large));
                 ui.add_space(12.0);
                 ui.label(
                     RichText::new("Loading")
-                        .font(font_id(ui, 14.5, OneUiFontWeight::Medium))
+                        .font(font_id(ui, 14.5, TwoUiFontWeight::Medium))
                         .color(p.text_muted),
                 );
             });
@@ -549,17 +549,17 @@ impl BloomApp {
         if let Some(err) = error {
             status_banner(
                 ui,
-                OneUiIcon::Info,
+                TwoUiIcon::Info,
                 p.functional_red,
                 "Unavailable",
                 Some(err),
             );
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.add(OneUiButton::primary("Retry")).clicked() {
+                if ui.add(TwoUiButton::primary("Retry")).clicked() {
                     self.fetch_builds_for_selection(dev, region, ui.ctx());
                 }
-                if ui.add(OneUiButton::outline("Region")).clicked() {
+                if ui.add(TwoUiButton::outline("Region")).clicked() {
                     self.open_region_picker_for(dev.clone());
                 }
             });
@@ -576,7 +576,7 @@ impl BloomApp {
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new("No builds")
-                            .font(font_id(ui, 14.5, OneUiFontWeight::Medium))
+                            .font(font_id(ui, 14.5, TwoUiFontWeight::Medium))
                             .color(p.text_muted),
                     );
                 });
@@ -660,7 +660,7 @@ impl BloomApp {
                                 };
                                 let tag_g = ui.painter().layout_no_wrap(
                                     badge_label.to_owned(),
-                                    font_id(ui, 10.0, OneUiFontWeight::SemiBold),
+                                    font_id(ui, 10.0, TwoUiFontWeight::SemiBold),
                                     badge_fg,
                                 );
                                 let pill_sz = tag_g.size() + vec2(12.0, 4.0);
@@ -695,14 +695,14 @@ impl BloomApp {
                                 );
                                 match d.update_type {
                                     FirmwareUpdateType::Feature => {
-                                        OneUiIcon::Star.paint(
+                                        TwoUiIcon::Star.paint(
                                             ui,
                                             icon_rect,
                                             type_icon_col(p.primary_high),
                                         );
                                     }
                                     FirmwareUpdateType::Security => {
-                                        OneUiIcon::Shield.paint(
+                                        TwoUiIcon::Shield.paint(
                                             ui,
                                             icon_rect,
                                             type_icon_col(p.functional_green),
@@ -728,7 +728,7 @@ impl BloomApp {
                             let emblem_size = if emblem.len() >= 4 { 14.5 } else { 18.0 };
                             let os_g = ui.painter().layout_no_wrap(
                                 emblem,
-                                font_id(ui, emblem_size, OneUiFontWeight::SemiBold),
+                                font_id(ui, emblem_size, TwoUiFontWeight::SemiBold),
                                 emblem_fg,
                             );
                             ui.painter().galley(
@@ -741,7 +741,7 @@ impl BloomApp {
                             let tail = short_build_tail(&item.build);
                             let pda_g = ui.painter().layout_no_wrap(
                                 tail.to_owned(),
-                                font_id(ui, 11.0, OneUiFontWeight::Medium),
+                                font_id(ui, 11.0, TwoUiFontWeight::Medium),
                                 p.text_muted,
                             );
                             let text_pos = pos2(
@@ -774,7 +774,7 @@ impl BloomApp {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 ui.label(
                                     RichText::new(tile_title)
-                                        .font(font_id(ui, 14.5, OneUiFontWeight::SemiBold))
+                                        .font(font_id(ui, 14.5, TwoUiFontWeight::SemiBold))
                                         .color(if is_locked {
                                             p.text_secondary
                                         } else {
@@ -783,7 +783,7 @@ impl BloomApp {
                                 );
                                 ui.label(
                                     RichText::new(build_date)
-                                        .font(font_id(ui, 12.5, OneUiFontWeight::Regular))
+                                        .font(font_id(ui, 12.5, TwoUiFontWeight::Regular))
                                         .color(p.text_muted),
                                 );
                             });
@@ -837,18 +837,18 @@ impl BloomApp {
         let p = &theme.palette;
         let mut chosen_region: Option<CscItem> = None;
 
-        OneUiBottomSheet::new("my_devices_region_sheet", "Region")
+        TwoUiBottomSheet::new("my_devices_region_sheet", "Region")
             .max_width(520.0)
             .max_height(520.0)
             .show(ctx, &mut self.region_sheet_open, |ui| {
                 ui.label(
                     RichText::new(dev.display_label())
-                        .font(font_id(ui, 14.0, OneUiFontWeight::Medium))
+                        .font(font_id(ui, 14.0, TwoUiFontWeight::Medium))
                         .color(p.primary_high),
                 );
                 ui.add_space(8.0);
 
-                let _ = OneUiSearchBar::new(&mut self.region_sheet_query)
+                let _ = TwoUiSearchBar::new(&mut self.region_sheet_query)
                     .hint("Search")
                     .show(ui);
                 ui.add_space(10.0);
@@ -863,7 +863,7 @@ impl BloomApp {
                         if ordered.is_empty() {
                             ui.label(
                                 RichText::new("No results")
-                                    .font(font_id(ui, 14.0, OneUiFontWeight::Medium))
+                                    .font(font_id(ui, 14.0, TwoUiFontWeight::Medium))
                                     .color(p.text_muted),
                             );
                             return;
@@ -953,7 +953,7 @@ impl BloomApp {
         let mut open_decrypt = false;
         let mut copy_fw = false;
 
-        OneUiBottomSheet::new("my_device_build_detail", &sheet_title)
+        TwoUiBottomSheet::new("my_device_build_detail", &sheet_title)
             .max_width(560.0)
             .max_height(500.0)
             .show(ctx, &mut self.build_detail_sheet_open, |ui| {
@@ -1030,7 +1030,7 @@ impl BloomApp {
                             ui.set_width(ui.available_width().max(120.0));
                             ui.label(
                                 RichText::new(notes)
-                                    .font(font_id(ui, 13.5, OneUiFontWeight::Regular))
+                                    .font(font_id(ui, 13.5, TwoUiFontWeight::Regular))
                                     .color(p.text_primary),
                             );
                         });
@@ -1040,13 +1040,13 @@ impl BloomApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
                     if ui
-                        .add(OneUiButton::contained_primary("Decrypt").icon(OneUiIcon::Shield))
+                        .add(TwoUiButton::contained_primary("Decrypt").icon(TwoUiIcon::Shield))
                         .clicked()
                     {
                         open_decrypt = true;
                     }
                     if ui
-                        .add(OneUiButton::outline("Copy").icon(OneUiIcon::Copy))
+                        .add(TwoUiButton::outline("Copy").icon(TwoUiIcon::Copy))
                         .clicked()
                     {
                         copy_fw = true;

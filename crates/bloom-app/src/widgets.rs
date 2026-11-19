@@ -2,8 +2,8 @@ use egui::{
     vec2, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Layout, Margin,
     Response, RichText, Stroke, TextEdit, Ui,
 };
-use egui_oneui::prelude::*;
-use egui_oneui::tokens::dimens;
+use egui_twoui::prelude::*;
+use egui_twoui::tokens::dimens;
 
 fn singleline_capsule(
     ui: &mut Ui,
@@ -78,14 +78,14 @@ pub fn labeled_text_field(
             ui.add_space(4.0);
             ui.label(
                 RichText::new(label)
-                    .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
+                    .font(font_id(ui, 13.0, TwoUiFontWeight::Medium))
                     .color(p.text_muted),
             );
             if let Some(cap) = caption {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(
                         RichText::new(cap)
-                            .font(font_id(ui, 12.0, OneUiFontWeight::Medium))
+                            .font(font_id(ui, 12.0, TwoUiFontWeight::Medium))
                             .color(p.primary_high),
                     );
                 });
@@ -163,7 +163,7 @@ pub fn path_picker_field(
                 ui.add_space(4.0);
                 ui.label(
                     RichText::new(label)
-                        .font(font_id(ui, 13.0, OneUiFontWeight::Medium))
+                        .font(font_id(ui, 13.0, TwoUiFontWeight::Medium))
                         .color(p.text_muted),
                 );
             });
@@ -184,7 +184,7 @@ pub fn path_picker_field(
 
                 if ui
                     .add(
-                        OneUiButton::outline(button_label)
+                        TwoUiButton::outline(button_label)
                             .enabled(enabled)
                             .min_size(vec2(98.0, 42.0)),
                     )
@@ -205,7 +205,7 @@ pub fn path_picker_field(
 /// Tinted One UI rounded status / notice banner.
 pub fn status_banner(
     ui: &mut Ui,
-    icon: OneUiIcon,
+    icon: TwoUiIcon,
     accent: Color32,
     title: &str,
     subtitle: Option<&str>,
@@ -227,13 +227,13 @@ pub fn status_banner(
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.label(
                         RichText::new(title)
-                            .font(font_id(ui, 14.5, OneUiFontWeight::SemiBold))
+                            .font(font_id(ui, 14.5, TwoUiFontWeight::SemiBold))
                             .color(p.text_primary),
                     );
                     if let Some(sub) = subtitle {
                         ui.label(
                             RichText::new(sub)
-                                .font(font_id(ui, 13.0, OneUiFontWeight::Regular))
+                                .font(font_id(ui, 13.0, TwoUiFontWeight::Regular))
                                 .color(p.text_secondary),
                         );
                     }
@@ -251,7 +251,7 @@ pub fn pill_tag(ui: &mut Ui, text: &str, bg: Color32, fg: Color32) {
         .show(ui, |ui| {
             ui.label(
                 RichText::new(text)
-                    .font(font_id(ui, 11.5, OneUiFontWeight::SemiBold))
+                    .font(font_id(ui, 11.5, TwoUiFontWeight::SemiBold))
                     .color(fg),
             );
         });
@@ -268,7 +268,7 @@ pub fn key_value_row(ui: &mut Ui, key: &str, value: &str, accent_value: bool) {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(key)
-                        .font(font_id(ui, 13.5, OneUiFontWeight::Regular))
+                        .font(font_id(ui, 13.5, TwoUiFontWeight::Regular))
                         .color(p.text_muted),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -278,9 +278,9 @@ pub fn key_value_row(ui: &mut Ui, key: &str, value: &str, accent_value: bool) {
                                 ui,
                                 13.5,
                                 if accent_value {
-                                    OneUiFontWeight::SemiBold
+                                    TwoUiFontWeight::SemiBold
                                 } else {
-                                    OneUiFontWeight::Medium
+                                    TwoUiFontWeight::Medium
                                 },
                             ))
                             .color(if accent_value {

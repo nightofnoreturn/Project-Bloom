@@ -14,7 +14,7 @@ use bloom_core::{
     HistoryItem, ImeiDb,
 };
 use egui::{Frame, Id};
-use egui_oneui::prelude::*;
+use egui_twoui::prelude::*;
 
 use state::{AppConfig, BloomPage, DecryptForm, SharedUiState, SnackAction, STORAGE_KEY};
 use tasks::{spawn_manual_decrypt, spawn_scan_usb_devices, spawn_sync_galaxy_db};
@@ -187,8 +187,8 @@ pub struct BloomApp {
     pub color_dialog_open: bool,
     pub color_dialog_draft: egui::Color32,
     pub reset_dialog_open: bool,
-    pub toast: OneUiToastState,
-    pub snackbar: OneUiSnackBarState,
+    pub toast: TwoUiToastState,
+    pub snackbar: TwoUiSnackBarState,
     pub active_snack_action: Option<SnackAction>,
 }
 
@@ -201,14 +201,14 @@ impl BloomApp {
 
         let initial_mode = if config.follow_system {
             detect_system_mode(&cc.egui_ctx, true).unwrap_or(if config.dark_mode {
-                OneUiMode::Dark
+                TwoUiMode::Dark
             } else {
-                OneUiMode::Light
+                TwoUiMode::Light
             })
         } else if config.dark_mode {
-            OneUiMode::Dark
+            TwoUiMode::Dark
         } else {
-            OneUiMode::Light
+            TwoUiMode::Light
         };
         config.dark_mode = initial_mode.is_dark();
 
@@ -273,8 +273,8 @@ impl BloomApp {
             color_dialog_open: false,
             color_dialog_draft: color_draft,
             reset_dialog_open: false,
-            toast: OneUiToastState::default(),
-            snackbar: OneUiSnackBarState::default(),
+            toast: TwoUiToastState::default(),
+            snackbar: TwoUiSnackBarState::default(),
             active_snack_action: None,
         };
 
@@ -285,9 +285,9 @@ impl BloomApp {
 
     pub fn sync_theme(&self, ctx: &egui::Context) {
         let mode = if self.config.dark_mode {
-            OneUiMode::Dark
+            TwoUiMode::Dark
         } else {
-            OneUiMode::Light
+            TwoUiMode::Light
         };
         let pref = if self.config.follow_system {
             egui::ThemePreference::System
@@ -301,9 +301,9 @@ impl BloomApp {
 
     pub fn apply_typography(&self, ctx: &egui::Context) {
         match self.config.typography_idx {
-            0 => install_typography(ctx, OneUiTypography::oneui_sans_tuned()),
-            1 => install_typography(ctx, OneUiTypography::stock_roboto()),
-            2 => install_typography(ctx, OneUiTypography::rounded_wide()),
+            0 => install_typography(ctx, TwoUiTypography::tuned()),
+            1 => install_typography(ctx, TwoUiTypography::stock_roboto()),
+            2 => install_typography(ctx, TwoUiTypography::rounded_wide()),
             _ => reset_default_fonts(ctx),
         }
     }
@@ -345,8 +345,8 @@ impl BloomApp {
         self.snackbar.show_message(ctx, msg, action_label);
     }
 
-    fn render_licenses_bottom_sheet(&mut self, ctx: &egui::Context, theme: &OneUiTheme) {
-        OneUiBottomSheet::new("bloom_licenses_sheet", "Open Source").show(
+    fn render_licenses_bottom_sheet(&mut self, ctx: &egui::Context, theme: &TwoUiTheme) {
+        TwoUiBottomSheet::new("bloom_licenses_sheet", "Open Source").show(
             ctx,
             &mut self.licenses_sheet_open,
             |ui| {
@@ -355,8 +355,8 @@ impl BloomApp {
                     .show(ui, |ui| {
                         ui.add(CardItem::new("bloom-core").summary("FUS, catalog & AES decrypt"));
                         ui.add(
-                            CardItem::new("egui-oneui v0.1.2")
-                                .summary("One UI 9 (SESL9) widgets")
+                            CardItem::new("egui-twoui")
+                                .summary("TwoUI tokens, icons & widgets")
                                 .top_divider(true),
                         );
                         ui.add(
@@ -440,7 +440,7 @@ impl eframe::App for BloomApp {
             ),
         ];
 
-        OneUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
+        TwoUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
             ui,
             &mut self.drawer_open,
             None,
@@ -463,7 +463,7 @@ impl eframe::App for BloomApp {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ui, |ui| {
-                let scaffold_resp = OneUiScaffold::new("bloom_scaffold", current_page.title())
+                let scaffold_resp = TwoUiScaffold::new("bloom_scaffold", current_page.title())
                     .nav_button(ScaffoldNavButton::DrawerMenu)
                     .window_controls(true)
                     .show(
@@ -493,14 +493,14 @@ impl eframe::App for BloomApp {
                         |ui| {
                             let items = [
                                 DividerButtonItem::new("Sync")
-                                    .icon(OneUiIcon::Refresh)
+                                    .icon(TwoUiIcon::Refresh)
                                     .enabled(!is_busy),
                                 DividerButtonItem::new("Decrypt")
-                                    .icon(OneUiIcon::Shield)
+                                    .icon(TwoUiIcon::Shield)
                                     .enabled(!is_busy),
                             ];
                             dec_action =
-                                OneUiDividerButtonLayout::new("dec_bar", &items).show(ui);
+                                TwoUiDividerButtonLayout::new("dec_bar", &items).show(ui);
                         },
                     );
                     if let Some(idx) = dec_action {
@@ -536,7 +536,7 @@ impl eframe::App for BloomApp {
         self.color_dialog_draft = draft;
 
         // Reset confirmation dialog with Undo SnackBar support
-        if let Some(idx) = OneUiDialog::new("bloom_reset_dialog", "Reset settings?")
+        if let Some(idx) = TwoUiDialog::new("bloom_reset_dialog", "Reset settings?")
             .body("Restore defaults?")
             .action(DialogAction::cancel("Cancel"))
             .action(DialogAction::destructive("Reset"))

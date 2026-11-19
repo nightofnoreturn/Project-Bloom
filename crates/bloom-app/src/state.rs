@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bloom_core::{ConnectedSamsungDevice, DeviceCatalog, HistoryItem, HistoryResult};
 use egui::Color32;
-use egui_oneui::prelude::OneUiIcon;
+use egui_twoui::prelude::TwoUiIcon;
 use serde::{Deserialize, Serialize};
 
 pub const STORAGE_KEY: &str = "bloom_config";
@@ -53,12 +53,12 @@ impl BloomPage {
         }
     }
 
-    pub fn icon(self) -> OneUiIcon {
+    pub fn icon(self) -> TwoUiIcon {
         match self {
-            Self::MyDevices => OneUiIcon::Apps,
-            Self::Decrypt => OneUiIcon::Shield,
-            Self::Settings => OneUiIcon::Settings,
-            Self::About => OneUiIcon::Info,
+            Self::MyDevices => TwoUiIcon::Apps,
+            Self::Decrypt => TwoUiIcon::Shield,
+            Self::Settings => TwoUiIcon::Settings,
+            Self::About => TwoUiIcon::Info,
         }
     }
 }
