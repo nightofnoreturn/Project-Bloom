@@ -57,6 +57,18 @@ impl BloomApp {
                     self.sync_theme(ui.ctx());
                 }
 
+                let blur_sw = SwitchItem::new(&mut self.config.backdrop_blur, "Blur")
+                    .icon(TwoUiIcon::BgBlur)
+                    .top_divider(true)
+                    .enabled(self.gl_available)
+                    .show(ui);
+                if blur_sw.toggled {
+                    set_backdrop_blur_enabled(
+                        ui.ctx(),
+                        self.gl_available && self.config.backdrop_blur,
+                    );
+                }
+
                 paint_divider(ui, DividerInset::WithLeading);
                 Frame::NONE
                     .inner_margin(Margin::symmetric(20, 12))

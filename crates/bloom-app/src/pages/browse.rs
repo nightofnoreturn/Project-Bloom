@@ -3,16 +3,15 @@ use bloom_core::{
     GalaxyDevice, HistoryItem,
 };
 use egui::{
-    pos2, vec2, Align, Color32, CornerRadius, Frame, Margin, Pos2, Rect, RichText, ScrollArea,
-    Sense, Stroke, StrokeKind, Ui,
+    pos2, vec2, Align, Color32, CornerRadius, Frame, Margin, Rect, RichText, ScrollArea, Sense,
+    Stroke, StrokeKind, Ui,
 };
 use egui_twoui::feedback::{interaction_factors, paint_state_overlay, recoil_rect};
 use egui_twoui::prelude::*;
 
 use crate::state::{
-    extract_emblem_text, format_firmware_tile_title, format_tile_date, short_build_tail,
+    extract_emblem_text, format_firmware_tile_title, format_tile_date, short_build_tail, BloomPage,
 };
-use crate::tasks::spawn_fetch_my_device_builds;
 use crate::widgets::{key_value_row, pill_tag, status_banner};
 use crate::BloomApp;
 
@@ -30,71 +29,8 @@ fn installed_build_for_model(
         .filter(|s| !s.is_empty())
 }
 
-fn paint_phone_glyph(painter: &egui::Painter, center: Pos2, color: Color32) {
-    let body = Rect::from_center_size(center, vec2(14.0, 22.0));
-    painter.rect_stroke(
-        body,
-        CornerRadius::same(3),
-        Stroke::new(1.5, color),
-        StrokeKind::Inside,
-    );
-    let cam = pos2(center.x, body.top() + 3.5);
-    painter.circle_filled(cam, 1.1, color);
-    painter.line_segment(
-        [
-            pos2(center.x - 3.0, body.bottom() - 3.0),
-            pos2(center.x + 3.0, body.bottom() - 3.0),
-        ],
-        Stroke::new(1.3, color),
-    );
-}
-
-fn paint_battery_glyph(painter: &egui::Painter, rect: Rect, pct: u8, fill: Color32, stroke: Color32) {
-    let body = Rect::from_min_size(rect.min, vec2(rect.width() - 3.0, rect.height()));
-    painter.rect_stroke(
-        body,
-        CornerRadius::same(3),
-        Stroke::new(1.2, stroke),
-        StrokeKind::Inside,
-    );
-    let nub = Rect::from_center_size(
-        pos2(body.right() + 1.5, body.center().y),
-        vec2(2.5, (rect.height() * 0.45).max(4.0)),
-    );
-    painter.rect_filled(nub, CornerRadius::same(1), stroke);
-
-    let inner = body.shrink(2.0);
-    let frac = (f32::from(pct.min(100)) / 100.0).max(0.08);
-    let level_rect = Rect::from_min_size(
-        inner.min,
-        vec2((inner.width() * frac).max(2.0), inner.height()),
-    );
-    painter.rect_filled(level_rect, CornerRadius::same(1), fill);
-}
-
-fn paint_padlock_glyph(painter: &egui::Painter, center: Pos2, color: Color32) {
-    let body = Rect::from_min_size(pos2(center.x - 4.5, center.y - 1.0), vec2(9.0, 7.0));
-    painter.rect_stroke(
-        body,
-        CornerRadius::same(2),
-        Stroke::new(1.3, color),
-        StrokeKind::Inside,
-    );
-    let left_x = center.x - 2.6;
-    let right_x = center.x + 2.6;
-    let top_y = center.y - 5.2;
-    let base_y = center.y - 1.0;
-    let arch_mid_y = top_y + 1.5;
-    let st = Stroke::new(1.3, color);
-    painter.line_segment([pos2(left_x, base_y), pos2(left_x, arch_mid_y)], st);
-    painter.line_segment([pos2(left_x, arch_mid_y), pos2(center.x - 1.3, top_y)], st);
-    painter.line_segment([pos2(center.x - 1.3, top_y), pos2(center.x + 1.3, top_y)], st);
-    painter.line_segment([pos2(center.x + 1.3, top_y), pos2(right_x, arch_mid_y)], st);
-    painter.line_segment([pos2(right_x, arch_mid_y), pos2(right_x, base_y)], st);
-}
-
 impl BloomApp {
-    pub fn render_my_devices_page(&mut self, ui: &mut Ui) {
+    pub fn render_browse_page(&mut self, ui: &mut Ui) {
         let snap = match self.shared.lock() {
             Ok(g) => (
                 g.device_db_syncing,
@@ -177,142 +113,6 @@ impl BloomApp {
         }
 
         let query_trimmed = self.device_search_query.trim().to_owned();
-        let query_lower = query_trimmed.to_ascii_lowercase();
-        let mut picked_device: Option<GalaxyDevice> = None;
-
-        // Live-connected Samsung devices detected via Windows WPD
-        let matching_usb: Vec<&ConnectedSamsungDevice> = connected_devices
-            .iter()
-            .filter(|d| {
-                query_lower.is_empty()
-                    || d.model.to_ascii_lowercase().contains(&query_lower)
-                    || d.friendly_name.to_ascii_lowercase().contains(&query_lower)
-            })
-            .collect();
-
-        if !matching_usb.is_empty() {
-            let resolved_matches: Vec<(&ConnectedSamsungDevice, Option<GalaxyDevice>)> =
-                if let Ok(guard) = self.shared.lock() {
-                    matching_usb
-                        .iter()
-                        .map(|u| (*u, guard.device_catalog.find_by_model(&u.model).cloned()))
-                        .collect()
-                } else {
-                    matching_usb.iter().map(|u| (*u, None)).collect()
-                };
-
-            for (usb, catalog_dev) in resolved_matches {
-                let target_dev = catalog_dev.unwrap_or_else(|| GalaxyDevice {
-                    marketing_name: usb.display_title().to_owned(),
-                    device: String::new(),
-                    model: usb.model.clone(),
-                });
-
-                let w = ui.available_width().max(220.0);
-                let (card_rect, card_resp) =
-                    ui.allocate_exact_size(vec2(w, 68.0), Sense::click());
-
-                if ui.is_rect_visible(card_rect) {
-                    let (press_t, hover_t) = interaction_factors(ui, &card_resp);
-                    let vis_rect = recoil_rect(card_rect, press_t, 1.0);
-                    let radius = CornerRadius::same(24);
-                    let painter = ui.painter();
-
-                    painter.rect(
-                        vis_rect,
-                        radius,
-                        p.surface,
-                        Stroke::new(1.0, p.primary.gamma_multiply(0.45)),
-                        StrokeKind::Inside,
-                    );
-                    paint_state_overlay(ui, vis_rect, radius, p, hover_t, press_t);
-
-                    let icon_box = Rect::from_min_size(
-                        pos2(vis_rect.left() + 14.0, vis_rect.center().y - 21.0),
-                        vec2(42.0, 42.0),
-                    );
-                    painter.rect_filled(icon_box, CornerRadius::same(14), p.selected_bg);
-                    paint_phone_glyph(painter, icon_box.center(), p.primary_high);
-
-                    let dot_center = pos2(icon_box.right() - 4.0, icon_box.bottom() - 4.0);
-                    painter.circle_filled(dot_center, 5.0, p.surface);
-                    painter.circle_filled(dot_center, 3.6, p.functional_green);
-
-                    // Right reserve for optional battery indicator + chevron
-                    let mut right_edge = vis_rect.right() - 16.0;
-                    let chev_rect = Rect::from_center_size(
-                        pos2(right_edge - 8.0, vis_rect.center().y),
-                        vec2(16.0, 16.0),
-                    );
-                    TwoUiIcon::ChevronRight.paint(ui, chev_rect, p.text_muted);
-                    right_edge -= 24.0;
-
-                    if let Some(pct) = usb.battery_percent {
-                        let bat_col = if pct <= 15 {
-                            p.functional_red
-                        } else if pct < 30 {
-                            p.functional_orange
-                        } else {
-                            p.functional_green
-                        };
-                        let pct_g = painter.layout_no_wrap(
-                            format!("{pct}%"),
-                            font_id(ui, 12.5, TwoUiFontWeight::Medium),
-                            p.text_secondary,
-                        );
-                        let pct_pos = pos2(
-                            right_edge - pct_g.size().x,
-                            vis_rect.center().y - pct_g.size().y * 0.5,
-                        );
-                        let bat_rect = Rect::from_center_size(
-                            pos2(pct_pos.x - 16.0, vis_rect.center().y),
-                            vec2(22.0, 12.0),
-                        );
-                        paint_battery_glyph(painter, bat_rect, pct, bat_col, p.text_muted);
-                        painter.galley(pct_pos, pct_g, p.text_secondary);
-                        right_edge = bat_rect.left() - 10.0;
-                    }
-
-                    let text_left = icon_box.right() + 14.0;
-                    let text_clip = Rect::from_min_max(
-                        pos2(text_left, vis_rect.top() + 8.0),
-                        pos2(right_edge.max(text_left + 40.0), vis_rect.bottom() - 8.0),
-                    );
-                    let clipped = painter.with_clip_rect(text_clip);
-
-                    let title_g = clipped.layout_no_wrap(
-                        usb.display_title().to_owned(),
-                        font_id(ui, 15.0, TwoUiFontWeight::SemiBold),
-                        p.text_primary,
-                    );
-                    let sub_text = match usb.firmware_build.as_deref() {
-                        Some(fw) if !fw.is_empty() => {
-                            format!("{} • {}", usb.model, short_build_tail(fw))
-                        }
-                        _ => usb.model.clone(),
-                    };
-                    let sub_g = clipped.layout_no_wrap(
-                        sub_text,
-                        font_id(ui, 12.5, TwoUiFontWeight::Regular),
-                        p.text_muted,
-                    );
-
-                    let total_h = title_g.size().y + 3.0 + sub_g.size().y;
-                    let start_y = vis_rect.center().y - total_h * 0.5;
-                    clipped.galley(pos2(text_left, start_y), title_g, p.text_primary);
-                    clipped.galley(
-                        pos2(text_left, start_y + 21.0),
-                        sub_g,
-                        p.text_muted,
-                    );
-                }
-
-                if card_resp.clicked() {
-                    picked_device = Some(target_dev);
-                }
-                ui.add_space(10.0);
-            }
-        }
 
         // Empty catalog first-run states
         if catalog_len == 0 {
@@ -327,7 +127,7 @@ impl BloomApp {
                             .color(p.text_muted),
                     );
                 });
-                if query_trimmed.len() < 4 && picked_device.is_none() {
+                if query_trimmed.len() < 4 {
                     return;
                 }
                 ui.add_space(20.0);
@@ -339,11 +139,6 @@ impl BloomApp {
                 }
                 ui.add_space(12.0);
             }
-        }
-
-        if let Some(dev) = picked_device.take() {
-            self.open_region_picker_for(dev);
-            return;
         }
 
         // Cached multi-token search across in-memory Galaxy catalog
@@ -384,7 +179,7 @@ impl BloomApp {
                 .any(|(_, d)| d.model.eq_ignore_ascii_case(&query_upper));
 
         if catalog_rows.is_empty() && !show_manual_fallback {
-            if !db_syncing && matching_usb.is_empty() {
+            if !db_syncing {
                 CardSection::new()
                     .inner_margin(Margin::symmetric(20, 18))
                     .show(ui, |ui| {
@@ -397,6 +192,8 @@ impl BloomApp {
             }
             return;
         }
+
+        let mut picked_device: Option<GalaxyDevice> = None;
 
         CardSection::new()
             .inner_margin(Margin::symmetric(0, 6))
@@ -442,7 +239,7 @@ impl BloomApp {
         }
     }
 
-    fn open_region_picker_for(&mut self, dev: GalaxyDevice) {
+    pub(crate) fn open_region_picker_for(&mut self, dev: GalaxyDevice) {
         self.region_sheet_device = Some(dev);
         self.region_sheet_query.clear();
         self.region_sheet_open = true;
@@ -680,7 +477,7 @@ impl BloomApp {
                                 );
                             }
 
-                            // Top-right update-type visual icon (Feature = Star, Security = Shield)
+                            // Top-right update-type visual icon (Feature = Star, Security = SecurityOutline)
                             if let Some(ref d) = decoded {
                                 let type_icon_col = |base: Color32| {
                                     if is_locked {
@@ -691,7 +488,7 @@ impl BloomApp {
                                 };
                                 let icon_rect = Rect::from_center_size(
                                     pos2(vis_rect.right() - 16.0, vis_rect.top() + 16.0),
-                                    vec2(13.0, 13.0),
+                                    vec2(14.0, 14.0),
                                 );
                                 match d.update_type {
                                     FirmwareUpdateType::Feature => {
@@ -702,7 +499,7 @@ impl BloomApp {
                                         );
                                     }
                                     FirmwareUpdateType::Security => {
-                                        TwoUiIcon::Shield.paint(
+                                        TwoUiIcon::SecurityOutline.paint(
                                             ui,
                                             icon_rect,
                                             type_icon_col(p.functional_green),
@@ -752,13 +549,13 @@ impl BloomApp {
                                 .with_clip_rect(vis_rect.shrink(6.0))
                                 .galley(text_pos, pda_g, p.text_muted);
 
-                            // Bottom-right padlock icon if Bootloader Bit < installed Bit
+                            // Bottom-right LockOutline icon if Bootloader Bit < installed Bit
                             if is_locked {
-                                paint_padlock_glyph(
-                                    ui.painter(),
+                                let lock_rect = Rect::from_center_size(
                                     pos2(vis_rect.right() - 16.0, vis_rect.bottom() - 15.0),
-                                    p.text_muted,
+                                    vec2(13.0, 13.0),
                                 );
+                                TwoUiIcon::LockOutline.paint(ui, lock_rect, p.text_muted);
                             }
                         }
 
@@ -837,7 +634,7 @@ impl BloomApp {
         let p = &theme.palette;
         let mut chosen_region: Option<CscItem> = None;
 
-        TwoUiBottomSheet::new("my_devices_region_sheet", "Region")
+        TwoUiBottomSheet::new("browse_region_sheet", "Region")
             .max_width(520.0)
             .max_height(520.0)
             .show(ctx, &mut self.region_sheet_open, |ui| {
@@ -892,6 +689,7 @@ impl BloomApp {
             self.selected_my_region = Some(region.clone());
             self.config.model = dev.model.clone();
             self.config.csc = region.code.clone();
+            self.page_id = BloomPage::Browse.id();
             self.fetch_builds_for_selection(&dev, &region, ctx);
         }
     }
@@ -953,7 +751,7 @@ impl BloomApp {
         let mut open_decrypt = false;
         let mut copy_fw = false;
 
-        TwoUiBottomSheet::new("my_device_build_detail", &sheet_title)
+        TwoUiBottomSheet::new("browse_build_detail", &sheet_title)
             .max_width(560.0)
             .max_height(500.0)
             .show(ctx, &mut self.build_detail_sheet_open, |ui| {
@@ -1040,7 +838,10 @@ impl BloomApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
                     if ui
-                        .add(TwoUiButton::contained_primary("Decrypt").icon(TwoUiIcon::Shield))
+                        .add(
+                            TwoUiButton::contained_primary("Decrypt")
+                                .icon(TwoUiIcon::SecurityOutline),
+                        )
                         .clicked()
                     {
                         open_decrypt = true;

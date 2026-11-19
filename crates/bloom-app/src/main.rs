@@ -10,13 +10,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bloom_core::{
-    default_device_cache_path, load_galaxy_cache, CscDb, CscItem, DeviceCatalog, GalaxyDevice,
-    HistoryItem, ImeiDb,
+    default_device_cache_path, load_galaxy_cache, ConnectedSamsungDevice, CscDb, CscItem,
+    DeviceCatalog, GalaxyDevice, HistoryItem, ImeiDb,
 };
 use egui::{Frame, Id};
 use egui_twoui::prelude::*;
 
-use state::{AppConfig, BloomPage, DecryptForm, SharedUiState, SnackAction, STORAGE_KEY};
+use state::{
+    AppConfig, BloomPage, DecryptForm, SharedUiState, SnackAction, CONNECTED_DEVICE_PAGE_BASE,
+    STORAGE_KEY,
+};
 use tasks::{spawn_manual_decrypt, spawn_scan_usb_devices, spawn_sync_galaxy_db};
 
 static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -162,8 +165,9 @@ pub struct BloomApp {
     pub config: AppConfig,
     pub decrypt_form: DecryptForm,
     pub last_usb_scan: Instant,
+    pub gl_available: bool,
 
-    // My Devices view & cached search state
+    // Browse catalog & firmware grid state
     pub device_search_query: String,
     pub device_search_cached_query: String,
     pub device_search_cached_rev: u64,
@@ -212,6 +216,9 @@ impl BloomApp {
         };
         config.dark_mode = initial_mode.is_dark();
 
+        let gl_available = cc.gl.is_some();
+        set_backdrop_blur_enabled(&cc.egui_ctx, gl_available && config.backdrop_blur);
+
         let rt = Arc::new(
             tokio::runtime::Runtime::new().expect("failed to initialize Tokio runtime"),
         );
@@ -251,6 +258,7 @@ impl BloomApp {
             config,
             decrypt_form,
             last_usb_scan: Instant::now(),
+            gl_available,
 
             device_search_query: String::new(),
             device_search_cached_query: String::new(),
@@ -268,7 +276,7 @@ impl BloomApp {
             edit_decrypt_paths_inline: false,
             licenses_sheet_open: false,
 
-            page_id: BloomPage::MyDevices.id(),
+            page_id: BloomPage::Browse.id(),
             drawer_open: true,
             color_dialog_open: false,
             color_dialog_draft: color_draft,
@@ -356,7 +364,7 @@ impl BloomApp {
                         ui.add(CardItem::new("bloom-core").summary("FUS, catalog & AES decrypt"));
                         ui.add(
                             CardItem::new("egui-twoui")
-                                .summary("TwoUI tokens, icons & widgets")
+                                .summary("Icons, GPU blur & layouts")
                                 .top_divider(true),
                         );
                         ui.add(
@@ -406,9 +414,17 @@ impl eframe::App for BloomApp {
         let theme = theme_from_ui(ui);
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (is_busy, db_syncing) = match self.shared.lock() {
-            Ok(g) => (g.is_busy(), g.device_db_syncing),
-            Err(_) => (false, false),
+        let (is_busy, db_syncing, connected_devices): (
+            bool,
+            bool,
+            Vec<ConnectedSamsungDevice>,
+        ) = match self.shared.lock() {
+            Ok(g) => (
+                g.is_busy(),
+                g.device_db_syncing,
+                g.connected_devices.clone(),
+            ),
+            Err(_) => (false, false, Vec::new()),
         };
 
         if is_busy || db_syncing {
@@ -416,38 +432,7 @@ impl eframe::App for BloomApp {
                 .request_repaint_after(Duration::from_millis(120));
         }
 
-        let entries = [
-            DrawerEntry::item(
-                BloomPage::MyDevices.id(),
-                BloomPage::MyDevices.title(),
-                BloomPage::MyDevices.icon(),
-            ),
-            DrawerEntry::item(
-                BloomPage::Decrypt.id(),
-                BloomPage::Decrypt.title(),
-                BloomPage::Decrypt.icon(),
-            ),
-            DrawerEntry::DottedDivider,
-            DrawerEntry::item(
-                BloomPage::Settings.id(),
-                BloomPage::Settings.title(),
-                BloomPage::Settings.icon(),
-            ),
-            DrawerEntry::item(
-                BloomPage::About.id(),
-                BloomPage::About.title(),
-                BloomPage::About.icon(),
-            ),
-        ];
-
-        TwoUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
-            ui,
-            &mut self.drawer_open,
-            None,
-        );
-
-        let current_page = BloomPage::from_id(self.page_id);
-        if cfg!(windows) && current_page == BloomPage::MyDevices {
+        if cfg!(windows) {
             if self.last_usb_scan.elapsed() >= Duration::from_secs(3) {
                 self.last_usb_scan = Instant::now();
                 spawn_scan_usb_devices(&self.rt, Arc::clone(&self.shared), ui.ctx().clone());
@@ -455,26 +440,103 @@ impl eframe::App for BloomApp {
             ui.ctx().request_repaint_after(Duration::from_secs(3));
         }
 
-        let has_floating_bar = current_page == BloomPage::Decrypt;
+        // Fall back to Browse if the currently open connected phone is unplugged.
+        if self.page_id >= CONNECTED_DEVICE_PAGE_BASE
+            && self.page_id - CONNECTED_DEVICE_PAGE_BASE >= connected_devices.len()
+        {
+            self.page_id = BloomPage::Browse.id();
+        }
+
+        let device_badges: Vec<Option<String>> = connected_devices
+            .iter()
+            .map(|d| d.battery_percent.map(|p| format!("{p}%")))
+            .collect();
+
+        let mut entries: Vec<DrawerEntry<'_>> = Vec::with_capacity(connected_devices.len() + 6);
+        for (idx, dev) in connected_devices.iter().enumerate() {
+            let entry_id = CONNECTED_DEVICE_PAGE_BASE + idx;
+            let entry = match device_badges[idx].as_deref() {
+                Some(badge) => DrawerEntry::with_badge(
+                    entry_id,
+                    dev.display_title(),
+                    TwoUiIcon::DeviceOutline,
+                    badge,
+                ),
+                None => DrawerEntry::item(
+                    entry_id,
+                    dev.display_title(),
+                    TwoUiIcon::DeviceOutline,
+                ),
+            };
+            entries.push(entry);
+        }
+        if !connected_devices.is_empty() {
+            entries.push(DrawerEntry::DottedDivider);
+        }
+        entries.push(DrawerEntry::item(
+            BloomPage::Browse.id(),
+            BloomPage::Browse.title(),
+            BloomPage::Browse.icon(),
+        ));
+        entries.push(DrawerEntry::item(
+            BloomPage::Decrypt.id(),
+            BloomPage::Decrypt.title(),
+            BloomPage::Decrypt.icon(),
+        ));
+        entries.push(DrawerEntry::DottedDivider);
+        entries.push(DrawerEntry::item(
+            BloomPage::Settings.id(),
+            BloomPage::Settings.title(),
+            BloomPage::Settings.icon(),
+        ));
+        entries.push(DrawerEntry::item(
+            BloomPage::About.id(),
+            BloomPage::About.title(),
+            BloomPage::About.icon(),
+        ));
+
+        TwoUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
+            ui,
+            &mut self.drawer_open,
+            None,
+        );
+
+        let active_connected_idx = self
+            .page_id
+            .checked_sub(CONNECTED_DEVICE_PAGE_BASE)
+            .filter(|&idx| idx < connected_devices.len());
+
+        let current_page = BloomPage::from_id(self.page_id);
+        let page_title: String = if let Some(idx) = active_connected_idx {
+            connected_devices[idx].display_title().to_owned()
+        } else {
+            current_page.title().to_owned()
+        };
+
+        let is_decrypt_page = active_connected_idx.is_none() && current_page == BloomPage::Decrypt;
         self.snackbar
-            .set_bottom_offset(if has_floating_bar { 88.0 } else { 24.0 });
+            .set_bottom_offset(if is_decrypt_page { 88.0 } else { 24.0 });
 
         let panel_frame = Frame::NONE.fill(theme.palette.round_and_bg);
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ui, |ui| {
-                let scaffold_resp = TwoUiScaffold::new("bloom_scaffold", current_page.title())
+                let scaffold_resp = TwoUiScaffold::new("bloom_scaffold", &page_title)
                     .nav_button(ScaffoldNavButton::DrawerMenu)
                     .window_controls(true)
                     .show(
                         ui,
                         |_toolbar_ui| {},
                         |ui| {
-                            match current_page {
-                                BloomPage::MyDevices => self.render_my_devices_page(ui),
-                                BloomPage::Decrypt => self.render_decrypt_page(ui),
-                                BloomPage::Settings => self.render_settings_page(ui),
-                                BloomPage::About => self.render_about_page(ui),
+                            if let Some(idx) = active_connected_idx {
+                                self.render_connected_device_page(ui, &connected_devices[idx]);
+                            } else {
+                                match current_page {
+                                    BloomPage::Browse => self.render_browse_page(ui),
+                                    BloomPage::Decrypt => self.render_decrypt_page(ui),
+                                    BloomPage::Settings => self.render_settings_page(ui),
+                                    BloomPage::About => self.render_about_page(ui),
+                                }
                             }
                             ui.add_space(28.0);
                         },
@@ -484,7 +546,7 @@ impl eframe::App for BloomApp {
                     self.drawer_open = !self.drawer_open;
                 }
 
-                if current_page == BloomPage::Decrypt {
+                if is_decrypt_page {
                     let mut dec_action: Option<usize> = None;
                     show_bottom_floating_bar(
                         ui,
@@ -496,7 +558,7 @@ impl eframe::App for BloomApp {
                                     .icon(TwoUiIcon::Refresh)
                                     .enabled(!is_busy),
                                 DividerButtonItem::new("Decrypt")
-                                    .icon(TwoUiIcon::Shield)
+                                    .icon(TwoUiIcon::SecurityOutline)
                                     .enabled(!is_busy),
                             ];
                             dec_action =
@@ -513,7 +575,7 @@ impl eframe::App for BloomApp {
                 }
             });
 
-        // My Devices region & build detail bottom sheets
+        // Browse region & build detail bottom sheets
         self.render_region_picker_sheet(ui.ctx());
         self.render_build_detail_sheet(ui.ctx());
 
@@ -547,6 +609,10 @@ impl eframe::App for BloomApp {
                 self.config = AppConfig::default();
                 self.sync_theme(ui.ctx());
                 self.apply_typography(ui.ctx());
+                set_backdrop_blur_enabled(
+                    ui.ctx(),
+                    self.gl_available && self.config.backdrop_blur,
+                );
                 self.show_snackbar_with_action(
                     ui.ctx(),
                     "Reset",
@@ -576,6 +642,10 @@ impl eframe::App for BloomApp {
                     self.config = *prev;
                     self.sync_theme(ui.ctx());
                     self.apply_typography(ui.ctx());
+                    set_backdrop_blur_enabled(
+                        ui.ctx(),
+                        self.gl_available && self.config.backdrop_blur,
+                    );
                     self.toast.show_message(ui.ctx(), "Restored", 1.8);
                 }
             }

@@ -7,6 +7,7 @@ use egui_twoui::prelude::TwoUiIcon;
 use serde::{Deserialize, Serialize};
 
 pub const STORAGE_KEY: &str = "bloom_config";
+pub const CONNECTED_DEVICE_PAGE_BASE: usize = 100;
 
 pub const ACCENT_PRESETS: [(&str, Color32); 5] = [
     ("One UI Blue", Color32::from_rgb(0x38, 0x7A, 0xFF)),
@@ -18,7 +19,7 @@ pub const ACCENT_PRESETS: [(&str, Color32); 5] = [
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BloomPage {
-    MyDevices,
+    Browse,
     Decrypt,
     Settings,
     About,
@@ -30,13 +31,13 @@ impl BloomPage {
             1 => Self::Decrypt,
             2 => Self::Settings,
             3 => Self::About,
-            _ => Self::MyDevices,
+            _ => Self::Browse,
         }
     }
 
     pub fn id(self) -> usize {
         match self {
-            Self::MyDevices => 0,
+            Self::Browse => 0,
             Self::Decrypt => 1,
             Self::Settings => 2,
             Self::About => 3,
@@ -46,7 +47,7 @@ impl BloomPage {
     /// Exact title shared 1-to-1 between the navigation drawer and the page header.
     pub fn title(self) -> &'static str {
         match self {
-            Self::MyDevices => "My Devices",
+            Self::Browse => "Browse",
             Self::Decrypt => "Decrypt",
             Self::Settings => "Settings",
             Self::About => "About",
@@ -55,10 +56,10 @@ impl BloomPage {
 
     pub fn icon(self) -> TwoUiIcon {
         match self {
-            Self::MyDevices => TwoUiIcon::Apps,
-            Self::Decrypt => TwoUiIcon::Shield,
-            Self::Settings => TwoUiIcon::Settings,
-            Self::About => TwoUiIcon::Info,
+            Self::Browse => TwoUiIcon::ListGrid,
+            Self::Decrypt => TwoUiIcon::SecurityOutline,
+            Self::Settings => TwoUiIcon::SettingsOutline,
+            Self::About => TwoUiIcon::InfoOutline,
         }
     }
 }
@@ -79,6 +80,7 @@ pub struct AppConfig {
     pub allow_mismatch: bool,
     pub dark_mode: bool,
     pub follow_system: bool,
+    pub backdrop_blur: bool,
     pub accent_rgb: [u8; 3],
     pub typography_idx: usize,
     pub history_lang_idx: usize,
@@ -100,6 +102,7 @@ impl Default for AppConfig {
             allow_mismatch: false,
             dark_mode: true,
             follow_system: true,
+            backdrop_blur: true,
             accent_rgb: [0x38, 0x7A, 0xFF],
             typography_idx: 0,
             history_lang_idx: 0,

@@ -43,7 +43,7 @@ impl BloomApp {
                 if ui
                     .add(
                         CardItem::new("Input")
-                            .icon(TwoUiIcon::Shield)
+                            .icon(TwoUiIcon::FileTypeZip)
                             .summary(in_summary)
                             .summary_highlight(!self.decrypt_form.input_path.trim().is_empty())
                             .chevron()
@@ -70,7 +70,7 @@ impl BloomApp {
                 if ui
                     .add(
                         CardItem::new("Output")
-                            .icon(TwoUiIcon::Apps)
+                            .icon(TwoUiIcon::FolderOutline)
                             .summary(out_summary)
                             .summary_highlight(!self.decrypt_form.output_path.trim().is_empty())
                             .chevron()
