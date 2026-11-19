@@ -4,12 +4,15 @@ use std::time::{Duration, Instant};
 
 use bloom_core::crypto::{decrypt_file_parallel, get_v2_key, key_from_string};
 use bloom_core::{
-    default_device_cache_path, delete_galaxy_cache, fetch_and_cache_galaxy_devices,
-    fetch_firmware_history, resolve_binary_with_fallback, scan_connected_samsung_devices,
-    BloomError, ChangelogLang, DeviceCatalog, ImeiDb,
+    clear_render_index_cache, default_device_cache_path, default_render_cache_dir,
+    delete_galaxy_cache, fetch_and_cache_galaxy_devices, fetch_firmware_history,
+    fetch_or_load_device_render_png, model_family_key, resolve_binary_with_fallback,
+    scan_connected_samsung_devices, BloomError, ChangelogLang, DeviceCatalog, ImeiDb,
 };
 
-use crate::state::{derive_decrypted_output, DecryptForm, SharedUiState, SnackAction};
+use crate::state::{
+    derive_decrypted_output, DecryptForm, DeviceRenderState, SharedUiState, SnackAction,
+};
 
 pub fn spawn_manual_decrypt(
     rt: &tokio::runtime::Runtime,
@@ -192,6 +195,10 @@ pub fn spawn_sync_galaxy_db(
         let cache_path = default_device_cache_path();
         if force_rebuild {
             let _ = delete_galaxy_cache(&cache_path);
+            clear_render_index_cache(&default_render_cache_dir());
+            if let Ok(mut guard) = shared.lock() {
+                guard.device_renders.clear();
+            }
         }
 
         match fetch_and_cache_galaxy_devices(&cache_path).await {
@@ -258,6 +265,64 @@ pub fn spawn_fetch_my_device_builds(
     });
 }
 
+async fn fetch_and_decode_render(model: String) -> DeviceRenderState {
+    let cache_dir = default_render_cache_dir();
+    let Some(png_bytes) = fetch_or_load_device_render_png(&model, &cache_dir).await else {
+        return DeviceRenderState::Unavailable;
+    };
+
+    let decoded = tokio::task::spawn_blocking(move || {
+        image::load_from_memory_with_format(&png_bytes, image::ImageFormat::Png)
+            .ok()
+            .map(|img| {
+                let rgba = img.to_rgba8();
+                (rgba.width(), rgba.height(), rgba.into_raw())
+            })
+    })
+    .await
+    .ok()
+    .flatten();
+
+    match decoded {
+        Some((width, height, rgba)) => DeviceRenderState::Ready {
+            width,
+            height,
+            rgba,
+        },
+        None => DeviceRenderState::Unavailable,
+    }
+}
+
+pub fn spawn_fetch_device_render(
+    rt: &tokio::runtime::Runtime,
+    shared: Arc<Mutex<SharedUiState>>,
+    ctx: egui::Context,
+    model: String,
+) {
+    let key = model_family_key(&model);
+    if key.is_empty() {
+        return;
+    }
+
+    if let Ok(mut guard) = shared.lock() {
+        if guard.device_renders.contains_key(&key) {
+            return;
+        }
+        guard
+            .device_renders
+            .insert(key.clone(), DeviceRenderState::Loading);
+    }
+    ctx.request_repaint();
+
+    rt.spawn(async move {
+        let next_state = fetch_and_decode_render(model).await;
+        if let Ok(mut guard) = shared.lock() {
+            guard.device_renders.insert(key, next_state);
+        }
+        ctx.request_repaint();
+    });
+}
+
 pub fn spawn_scan_usb_devices(
     rt: &tokio::runtime::Runtime,
     shared: Arc<Mutex<SharedUiState>>,
@@ -275,15 +340,33 @@ pub fn spawn_scan_usb_devices(
             .await
             .unwrap_or_default();
 
+        let mut pending_renders: Vec<(String, String)> = Vec::new();
         let mut changed = false;
         if let Ok(mut guard) = shared.lock() {
             guard.usb_scanning = false;
             if guard.connected_devices != detected {
-                guard.connected_devices = detected;
+                guard.connected_devices = detected.clone();
                 changed = true;
+            }
+            for dev in &detected {
+                let key = model_family_key(&dev.model);
+                if !key.is_empty() && !guard.device_renders.contains_key(&key) {
+                    guard
+                        .device_renders
+                        .insert(key.clone(), DeviceRenderState::Loading);
+                    pending_renders.push((key, dev.model.clone()));
+                }
             }
         }
         if changed {
+            ctx.request_repaint();
+        }
+
+        for (key, model) in pending_renders {
+            let next_state = fetch_and_decode_render(model).await;
+            if let Ok(mut guard) = shared.lock() {
+                guard.device_renders.insert(key, next_state);
+            }
             ctx.request_repaint();
         }
     });

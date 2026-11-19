@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -132,11 +133,20 @@ pub enum SnackAction {
     RestoreConfig(Box<AppConfig>),
 }
 
+#[derive(Debug, Clone)]
+pub enum DeviceRenderState {
+    Loading,
+    Ready { width: u32, height: u32, rgba: Vec<u8> },
+    Uploaded,
+    Unavailable,
+}
+
 #[derive(Debug, Default)]
 pub struct SharedUiState {
     pub decrypting: bool,
     pub usb_scanning: bool,
     pub connected_devices: Vec<ConnectedSamsungDevice>,
+    pub device_renders: HashMap<String, DeviceRenderState>,
     pub device_db_syncing: bool,
     pub device_db_error: Option<String>,
     pub device_catalog: DeviceCatalog,

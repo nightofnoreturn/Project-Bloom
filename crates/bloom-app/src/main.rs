@@ -5,6 +5,7 @@ mod state;
 mod tasks;
 mod widgets;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -166,6 +167,7 @@ pub struct BloomApp {
     pub decrypt_form: DecryptForm,
     pub last_usb_scan: Instant,
     pub gl_available: bool,
+    pub device_render_textures: HashMap<String, egui::TextureHandle>,
 
     // Browse catalog & firmware grid state
     pub device_search_query: String,
@@ -259,6 +261,7 @@ impl BloomApp {
             decrypt_form,
             last_usb_scan: Instant::now(),
             gl_available,
+            device_render_textures: HashMap::new(),
 
             device_search_query: String::new(),
             device_search_cached_query: String::new(),

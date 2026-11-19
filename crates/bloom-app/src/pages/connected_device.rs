@@ -1,5 +1,5 @@
 use bloom_core::{
-    ConnectedSamsungDevice, DecodedBuildCode, FirmwareUpdateType, GalaxyDevice,
+    model_family_key, ConnectedSamsungDevice, DecodedBuildCode, FirmwareUpdateType, GalaxyDevice,
 };
 use egui::{
     pos2, vec2, Align, Color32, CornerRadius, Frame, Layout, Margin, Rect, RichText, Sense, Stroke,
@@ -7,9 +7,57 @@ use egui::{
 };
 use egui_twoui::prelude::*;
 
-use crate::state::short_build_tail;
+use crate::state::{short_build_tail, DeviceRenderState};
+use crate::tasks::spawn_fetch_device_render;
 use crate::widgets::{key_value_row, pill_tag};
 use crate::BloomApp;
+
+enum SplashHeroState {
+    Texture(egui::TextureHandle),
+    Loading,
+    Fallback,
+}
+
+fn paint_official_render_hero(
+    ui: &mut Ui,
+    p: &TwoUiPalette,
+    texture: &egui::TextureHandle,
+) {
+    let box_size = vec2(210.0, 210.0);
+    let (outer, _) = ui.allocate_exact_size(box_size, Sense::hover());
+    if !ui.is_rect_visible(outer) {
+        return;
+    }
+
+    let painter = ui.painter();
+    let center = outer.center();
+    painter.circle_filled(center, 78.0, p.primary.gamma_multiply(0.08));
+    painter.circle_filled(center, 52.0, p.primary.gamma_multiply(0.14));
+
+    let tex_sz = texture.size_vec2();
+    let draw_size = if tex_sz.x > 0.0 && tex_sz.y > 0.0 {
+        let scale = (outer.width() / tex_sz.x).min(outer.height() / tex_sz.y);
+        tex_sz * scale
+    } else {
+        vec2(180.0, 180.0)
+    };
+    let draw_rect = Rect::from_center_size(center, draw_size);
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    painter.image(texture.id(), draw_rect, uv, Color32::WHITE);
+}
+
+fn paint_loading_splash_hero(ui: &mut Ui, p: &TwoUiPalette) {
+    let box_size = vec2(210.0, 210.0);
+    let (outer, _) = ui.allocate_exact_size(box_size, Sense::hover());
+    if ui.is_rect_visible(outer) {
+        let painter = ui.painter();
+        let center = outer.center();
+        painter.circle_filled(center, 66.0, p.primary.gamma_multiply(0.08));
+        painter.circle_filled(center, 44.0, p.primary.gamma_multiply(0.14));
+    }
+    let spinner_rect = Rect::from_center_size(outer.center(), vec2(36.0, 36.0));
+    ui.put(spinner_rect, TwoUiSpinner::indeterminate(SpinnerSize::Medium));
+}
 
 fn paint_galaxy_splash_hero(
     ui: &mut Ui,
@@ -143,6 +191,77 @@ impl BloomApp {
         }
     }
 
+    fn resolve_splash_hero_state(
+        &mut self,
+        ctx: &egui::Context,
+        model: &str,
+    ) -> SplashHeroState {
+        let render_key = model_family_key(model);
+        if let Some(tex) = self.device_render_textures.get(&render_key) {
+            return SplashHeroState::Texture(tex.clone());
+        }
+        if render_key.is_empty() {
+            return SplashHeroState::Fallback;
+        }
+
+        let mut needs_spawn = false;
+        let mut ready_pixels: Option<(u32, u32, Vec<u8>)> = None;
+        let mut is_loading = false;
+
+        if let Ok(mut guard) = self.shared.lock() {
+            match guard.device_renders.get_mut(&render_key) {
+                None => {
+                    needs_spawn = true;
+                    is_loading = true;
+                }
+                Some(DeviceRenderState::Loading) => {
+                    is_loading = true;
+                }
+                Some(DeviceRenderState::Uploaded | DeviceRenderState::Unavailable) => {}
+                Some(slot @ DeviceRenderState::Ready { .. }) => {
+                    if let DeviceRenderState::Ready {
+                        width,
+                        height,
+                        rgba,
+                    } = std::mem::replace(slot, DeviceRenderState::Uploaded)
+                    {
+                        ready_pixels = Some((width, height, rgba));
+                    }
+                }
+            }
+        }
+
+        if needs_spawn {
+            spawn_fetch_device_render(
+                &self.rt,
+                std::sync::Arc::clone(&self.shared),
+                ctx.clone(),
+                model.to_owned(),
+            );
+        }
+
+        if let Some((width, height, rgba)) = ready_pixels {
+            let img = egui::ColorImage::from_rgba_unmultiplied(
+                [width as usize, height as usize],
+                &rgba,
+            );
+            let tex = ctx.load_texture(
+                format!("bloom_render_{render_key}"),
+                img,
+                egui::TextureOptions::LINEAR,
+            );
+            self.device_render_textures
+                .insert(render_key, tex.clone());
+            return SplashHeroState::Texture(tex);
+        }
+
+        if is_loading {
+            SplashHeroState::Loading
+        } else {
+            SplashHeroState::Fallback
+        }
+    }
+
     fn render_device_splash_pane(
         &mut self,
         ui: &mut Ui,
@@ -152,6 +271,11 @@ impl BloomApp {
         let theme = theme_from_ui(ui);
         let p = &theme.palette;
         let build_tail = dev.firmware_build.as_deref().map(short_build_tail);
+        let hero_state = self.resolve_splash_hero_state(ui.ctx(), &dev.model);
+        if matches!(hero_state, SplashHeroState::Loading) {
+            ui.ctx().request_repaint();
+        }
+
         let mut firmware_clicked = false;
 
         CardSection::new()
@@ -159,7 +283,17 @@ impl BloomApp {
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 10.0;
-                    paint_galaxy_splash_hero(ui, &theme, build_tail);
+                    match &hero_state {
+                        SplashHeroState::Texture(tex) => {
+                            paint_official_render_hero(ui, p, tex);
+                        }
+                        SplashHeroState::Loading => {
+                            paint_loading_splash_hero(ui, p);
+                        }
+                        SplashHeroState::Fallback => {
+                            paint_galaxy_splash_hero(ui, &theme, build_tail);
+                        }
+                    }
 
                     ui.add_space(4.0);
                     ui.label(
@@ -169,7 +303,11 @@ impl BloomApp {
                     );
 
                     let subtitle = match catalog_dev {
-                        Some(cat) if !cat.marketing_name.eq_ignore_ascii_case(dev.display_title()) => {
+                        Some(cat)
+                            if !cat
+                                .marketing_name
+                                .eq_ignore_ascii_case(dev.display_title()) =>
+                        {
                             format!("{} • {}", cat.marketing_name, dev.model)
                         }
                         _ => dev.model.clone(),

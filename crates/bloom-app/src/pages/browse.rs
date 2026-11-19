@@ -596,7 +596,10 @@ impl BloomApp {
         }
     }
 
-    pub fn trigger_sync_galaxy_db(&self, ctx: &egui::Context, force_rebuild: bool) {
+    pub fn trigger_sync_galaxy_db(&mut self, ctx: &egui::Context, force_rebuild: bool) {
+        if force_rebuild {
+            self.device_render_textures.clear();
+        }
         crate::tasks::spawn_sync_galaxy_db(&self.rt, self.shared.clone(), ctx.clone(), force_rebuild);
     }
 

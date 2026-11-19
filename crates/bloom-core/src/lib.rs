@@ -5,6 +5,7 @@ pub mod downloader;
 pub mod error;
 pub mod fus;
 pub mod history;
+pub mod renders;
 pub mod usb;
 pub mod xml;
 
@@ -26,5 +27,10 @@ pub use fus::{resolve_binary_with_fallback, FusClient, FusMode, PreparedDownload
 pub use history::{
     extract_one_ui_version_from_notes, fetch_firmware_history, propagate_one_ui_versions,
     Changelog, ChangelogLang, DecodedBuildCode, FirmwareUpdateType, HistoryItem, HistoryResult,
+};
+pub use renders::{
+    cached_render_png_path, clear_render_index_cache, default_render_cache_dir,
+    fetch_or_load_device_render_png, model_family_key, normalize_samsung_render_url,
+    parse_finder_render_urls, DeviceRenderIndex,
 };
 pub use usb::{scan_connected_samsung_devices, ConnectedSamsungDevice};

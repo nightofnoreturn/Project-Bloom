@@ -15,6 +15,7 @@ bloom-core = { path = "../bloom-core" }
 eframe.workspace = true
 egui.workspace = true
 egui-twoui.workspace = true
+image.workspace = true
 rfd.workspace = true
 serde.workspace = true
 tokio.workspace = true
