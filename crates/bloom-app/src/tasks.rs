@@ -6,8 +6,9 @@ use bloom_core::crypto::{decrypt_file_parallel, get_v2_key, key_from_string};
 use bloom_core::{
     clear_render_index_cache, default_device_cache_path, default_render_cache_dir,
     delete_galaxy_cache, fetch_and_cache_galaxy_devices, fetch_firmware_history,
-    fetch_or_load_device_render_png, model_family_key, resolve_binary_with_fallback,
-    scan_connected_samsung_devices, BloomError, ChangelogLang, DeviceCatalog, ImeiDb,
+    fetch_or_load_device_render_png, has_newer_build_in_history, render_cache_key,
+    resolve_binary_with_fallback, scan_connected_samsung_devices, BloomError, ChangelogLang,
+    DeviceCatalog, ImeiDb,
 };
 
 use crate::state::{
@@ -265,9 +266,11 @@ pub fn spawn_fetch_my_device_builds(
     });
 }
 
-async fn fetch_and_decode_render(model: String) -> DeviceRenderState {
+async fn fetch_and_decode_render(model: String, color_code: Option<String>) -> DeviceRenderState {
     let cache_dir = default_render_cache_dir();
-    let Some(png_bytes) = fetch_or_load_device_render_png(&model, &cache_dir).await else {
+    let Some(png_bytes) =
+        fetch_or_load_device_render_png(&model, color_code.as_deref(), &cache_dir).await
+    else {
         return DeviceRenderState::Unavailable;
     };
 
@@ -298,8 +301,9 @@ pub fn spawn_fetch_device_render(
     shared: Arc<Mutex<SharedUiState>>,
     ctx: egui::Context,
     model: String,
+    color_code: Option<String>,
 ) {
-    let key = model_family_key(&model);
+    let key = render_cache_key(&model, color_code.as_deref());
     if key.is_empty() {
         return;
     }
@@ -315,7 +319,7 @@ pub fn spawn_fetch_device_render(
     ctx.request_repaint();
 
     rt.spawn(async move {
-        let next_state = fetch_and_decode_render(model).await;
+        let next_state = fetch_and_decode_render(model, color_code).await;
         if let Ok(mut guard) = shared.lock() {
             guard.device_renders.insert(key, next_state);
         }
@@ -323,7 +327,69 @@ pub fn spawn_fetch_device_render(
     });
 }
 
-pub fn spawn_scan_usb_devices(
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_check_device_update(
+    rt: &tokio::runtime::Runtime,
+    shared: Arc<Mutex<SharedUiState>>,
+    ctx: egui::Context,
+    device_id: String,
+    model: String,
+    region: String,
+    installed_build: Option<String>,
+    lang: ChangelogLang,
+    mark_checked: bool,
+) {
+    let model = model.trim().to_ascii_uppercase();
+    let region = region.trim().to_ascii_uppercase();
+    if device_id.is_empty() || model.is_empty() || region.is_empty() {
+        return;
+    }
+
+    if let Ok(mut guard) = shared.lock() {
+        let entry = guard.device_updates.entry(device_id.clone()).or_default();
+        if entry.loading {
+            return;
+        }
+        entry.loading = true;
+        entry.error = None;
+    }
+    ctx.request_repaint();
+
+    rt.spawn(async move {
+        match fetch_firmware_history(&model, &region, lang).await {
+            Ok(res) => {
+                let newer = installed_build
+                    .as_deref()
+                    .and_then(|cur| has_newer_build_in_history(&res, cur));
+                let update_available = newer.is_some();
+                let latest_build = newer
+                    .map(|i| i.build.clone())
+                    .or_else(|| res.items.first().map(|i| i.build.clone()));
+                if let Ok(mut guard) = shared.lock() {
+                    let entry = guard.device_updates.entry(device_id).or_default();
+                    entry.loading = false;
+                    entry.checked = entry.checked || mark_checked;
+                    entry.update_available = update_available;
+                    entry.latest_build = latest_build;
+                    entry.region_used = Some(region);
+                    entry.history = Some(res);
+                    entry.error = None;
+                }
+            }
+            Err(e) => {
+                if let Ok(mut guard) = shared.lock() {
+                    let entry = guard.device_updates.entry(device_id).or_default();
+                    entry.loading = false;
+                    entry.checked = entry.checked || mark_checked;
+                    entry.error = Some(e.to_string());
+                }
+            }
+        }
+        ctx.request_repaint();
+    });
+}
+
+pub fn spawn_scan_adb_devices(
     rt: &tokio::runtime::Runtime,
     shared: Arc<Mutex<SharedUiState>>,
     ctx: egui::Context,
@@ -340,7 +406,7 @@ pub fn spawn_scan_usb_devices(
             .await
             .unwrap_or_default();
 
-        let mut pending_renders: Vec<(String, String)> = Vec::new();
+        let mut pending_renders: Vec<(String, String, Option<String>)> = Vec::new();
         let mut changed = false;
         if let Ok(mut guard) = shared.lock() {
             guard.usb_scanning = false;
@@ -349,12 +415,12 @@ pub fn spawn_scan_usb_devices(
                 changed = true;
             }
             for dev in &detected {
-                let key = model_family_key(&dev.model);
+                let key = render_cache_key(&dev.model, dev.color_code.as_deref());
                 if !key.is_empty() && !guard.device_renders.contains_key(&key) {
                     guard
                         .device_renders
                         .insert(key.clone(), DeviceRenderState::Loading);
-                    pending_renders.push((key, dev.model.clone()));
+                    pending_renders.push((key, dev.model.clone(), dev.color_code.clone()));
                 }
             }
         }
@@ -362,8 +428,8 @@ pub fn spawn_scan_usb_devices(
             ctx.request_repaint();
         }
 
-        for (key, model) in pending_renders {
-            let next_state = fetch_and_decode_render(model).await;
+        for (key, model, color_code) in pending_renders {
+            let next_state = fetch_and_decode_render(model, color_code).await;
             if let Ok(mut guard) = shared.lock() {
                 guard.device_renders.insert(key, next_state);
             }

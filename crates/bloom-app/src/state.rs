@@ -133,6 +133,25 @@ pub enum SnackAction {
     RestoreConfig(Box<AppConfig>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeviceRightPane {
+    #[default]
+    Info,
+    WhatsNew,
+    RegionPicker,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeviceUpdateState {
+    pub loading: bool,
+    pub checked: bool,
+    pub update_available: bool,
+    pub latest_build: Option<String>,
+    pub region_used: Option<String>,
+    pub history: Option<HistoryResult>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum DeviceRenderState {
     Loading,
@@ -147,6 +166,7 @@ pub struct SharedUiState {
     pub usb_scanning: bool,
     pub connected_devices: Vec<ConnectedSamsungDevice>,
     pub device_renders: HashMap<String, DeviceRenderState>,
+    pub device_updates: HashMap<String, DeviceUpdateState>,
     pub device_db_syncing: bool,
     pub device_db_error: Option<String>,
     pub device_catalog: DeviceCatalog,

@@ -144,6 +144,114 @@ impl DecodedBuildCode {
     pub fn month_year_label(&self) -> Option<String> {
         Some(format!("{} {}", self.month_short_name()?, self.year?))
     }
+
+    /// Returns `true` when the build code carries Samsung's `XX` global region group.
+    pub fn is_global(&self) -> bool {
+        self.region_group.eq_ignore_ascii_case("XX")
+    }
+
+    /// Classifies the 2-character build region group (`Global (XX)` vs `Non-Global (<code>)`).
+    pub fn region_classification(&self) -> String {
+        if self.is_global() {
+            format!("Global ({})", self.region_group)
+        } else {
+            format!("Non-Global ({})", self.region_group)
+        }
+    }
+
+    /// Formats the bootloader binary value for About Phone (`18 (I)` or `5`).
+    pub fn binary_label(&self) -> String {
+        if self.bootloader_bit.is_ascii_digit() {
+            format!("{}", self.bootloader_level)
+        } else {
+            format!("{} ({})", self.bootloader_level, self.bootloader_bit)
+        }
+    }
+
+    /// Formats the build revision code (`D (13)` or `7`).
+    pub fn revision_label(&self) -> String {
+        if self.revision_code.is_ascii_digit() {
+            self.revision_code.to_string()
+        } else if let Some(rev) = self.revision {
+            format!("{} ({rev})", self.revision_code)
+        } else {
+            self.revision_code.to_string()
+        }
+    }
+}
+
+/// Returns `true` when `candidate` is strictly newer chronologically than `installed`.
+pub fn is_build_newer(candidate: &str, installed: &str) -> bool {
+    let cand_pda = build_from_fw(candidate).to_ascii_uppercase();
+    let inst_pda = build_from_fw(installed).to_ascii_uppercase();
+    if cand_pda.is_empty() || inst_pda.is_empty() || cand_pda == inst_pda {
+        return false;
+    }
+    let (Some(c), Some(i)) = (
+        DecodedBuildCode::decode(&cand_pda),
+        DecodedBuildCode::decode(&inst_pda),
+    ) else {
+        return false;
+    };
+    let c_key = (
+        c.bootloader_level,
+        c.os_gen,
+        c.year.unwrap_or(0),
+        c.month.unwrap_or(0),
+        c.revision.unwrap_or(0),
+    );
+    let i_key = (
+        i.bootloader_level,
+        i.os_gen,
+        i.year.unwrap_or(0),
+        i.month.unwrap_or(0),
+        i.revision.unwrap_or(0),
+    );
+    c_key > i_key
+}
+
+/// Checks a fetched [`HistoryResult`] against `installed_build` and returns the newer latest
+/// entry if an update above the installed build exists.
+pub fn has_newer_build_in_history<'a>(
+    history: &'a HistoryResult,
+    installed_build: &str,
+) -> Option<&'a HistoryItem> {
+    let installed = build_from_fw(installed_build).to_ascii_uppercase();
+    if installed.is_empty() {
+        return None;
+    }
+    let latest = history.items.first()?;
+    if latest.build.eq_ignore_ascii_case(&installed) {
+        return None;
+    }
+    if history
+        .items
+        .iter()
+        .skip(1)
+        .any(|item| item.build.eq_ignore_ascii_case(&installed))
+    {
+        return Some(latest);
+    }
+    is_build_newer(&latest.build, &installed).then_some(latest)
+}
+
+/// Neutral hardware-suffix CSC fallback used only when live ADB sales code telemetry is absent.
+pub fn fallback_csc_for_model(model: &str) -> &'static str {
+    let base = model.trim().split('/').next().unwrap_or("").trim();
+    let upper = base.to_ascii_uppercase();
+    if upper.ends_with("U1") || upper.ends_with('U') {
+        "XAA"
+    } else if upper.ends_with('N') {
+        "KOO"
+    } else if upper.ends_with('W') {
+        "XAC"
+    } else if upper.ends_with('0') {
+        "TGY"
+    } else if upper.ends_with('E') || upper.ends_with('F') {
+        "INS"
+    } else {
+        "EUX"
+    }
 }
 
 /// Extracts a numbered `One UI <ver>` heading from the first non-empty line of changelog notes,
@@ -905,5 +1013,54 @@ mod tests {
         assert!(old.is_downgrade_blocked(18));
         assert!(!old.is_downgrade_blocked(5));
         assert!(!ezjd.is_downgrade_blocked(18));
+        assert!(ezjd.is_global());
+        assert_eq!(ezjd.region_classification(), "Global (XX)");
+        assert_eq!(ezjd.binary_label(), "18 (I)");
+        assert_eq!(ezjd.revision_label(), "D (13)");
+
+        let us = DecodedBuildCode::decode("S921USQU4AXH7").expect("valid US build");
+        assert!(!us.is_global());
+        assert_eq!(us.region_classification(), "Non-Global (SQ)");
+        assert_eq!(us.binary_label(), "4");
+        assert_eq!(us.revision_label(), "7");
+    }
+
+    #[test]
+    fn compares_build_chronology_and_history_updates() {
+        assert!(is_build_newer("S921BXXUIEZJE", "S921BXXUIEZJD"));
+        assert!(is_build_newer("S921BXXSIFZA1", "S921BXXUIEZJD"));
+        assert!(!is_build_newer("S921BXXUIEZJD", "S921BXXUIEZJD"));
+        assert!(!is_build_newer("S921BXXUIEZJA", "S921BXXUIEZJD"));
+
+        let hist = HistoryResult {
+            model: "SM-S921B".into(),
+            region: "XID".into(),
+            items: vec![
+                HistoryItem {
+                    firmware: "S921BXXUIEZJE/S921BOLEIEZJE/S921BXXUIEZJE/S921BXXUIEZJE".into(),
+                    build: "S921BXXUIEZJE".into(),
+                    date: Some("2026-11-20".into()),
+                    android_version: Some("17".into()),
+                    one_ui_version: Some("One UI 9".into()),
+                    changelog: None,
+                },
+                HistoryItem {
+                    firmware: "S921BXXUIEZJD/S921BOLEIEZJD/S921BXXUIEZJB/S921BXXUIEZJD".into(),
+                    build: "S921BXXUIEZJD".into(),
+                    date: Some("2026-11-01".into()),
+                    android_version: Some("17".into()),
+                    one_ui_version: Some("One UI 9".into()),
+                    changelog: None,
+                },
+            ],
+            changelogs: Vec::new(),
+            source: "SmartHistory".into(),
+        };
+
+        assert!(has_newer_build_in_history(&hist, "S921BXXUIEZJD").is_some());
+        assert!(has_newer_build_in_history(&hist, "S921BXXUIEZJE").is_none());
+        assert!(has_newer_build_in_history(&hist, "S921BXXUJFZA1").is_none());
+        assert_eq!(fallback_csc_for_model("SM-S921B"), "EUX");
+        assert_eq!(fallback_csc_for_model("SM-S921U1"), "XAA");
     }
 }

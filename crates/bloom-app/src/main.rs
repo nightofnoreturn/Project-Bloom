@@ -18,10 +18,10 @@ use egui::{Frame, Id};
 use egui_twoui::prelude::*;
 
 use state::{
-    AppConfig, BloomPage, DecryptForm, SharedUiState, SnackAction, CONNECTED_DEVICE_PAGE_BASE,
-    STORAGE_KEY,
+    AppConfig, BloomPage, DecryptForm, DeviceRightPane, SharedUiState, SnackAction,
+    CONNECTED_DEVICE_PAGE_BASE, STORAGE_KEY,
 };
-use tasks::{spawn_manual_decrypt, spawn_scan_usb_devices, spawn_sync_galaxy_db};
+use tasks::{spawn_manual_decrypt, spawn_scan_adb_devices, spawn_sync_galaxy_db};
 
 static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
 
@@ -183,6 +183,11 @@ pub struct BloomApp {
     pub selected_grid_build: Option<HistoryItem>,
     pub build_detail_sheet_open: bool,
 
+    // Connected device split-pane state
+    pub device_right_pane: DeviceRightPane,
+    pub device_region_query: String,
+    pub last_connected_device_id: Option<String>,
+
     // Other pages state
     pub edit_decrypt_paths_inline: bool,
     pub licenses_sheet_open: bool,
@@ -240,9 +245,7 @@ impl BloomApp {
         if needs_initial_sync {
             spawn_sync_galaxy_db(&rt, Arc::clone(&shared), cc.egui_ctx.clone(), false);
         }
-        if cfg!(windows) {
-            spawn_scan_usb_devices(&rt, Arc::clone(&shared), cc.egui_ctx.clone());
-        }
+        spawn_scan_adb_devices(&rt, Arc::clone(&shared), cc.egui_ctx.clone());
 
         let decrypt_form = DecryptForm {
             model: config.model.clone(),
@@ -275,6 +278,10 @@ impl BloomApp {
             region_sheet_query: String::new(),
             selected_grid_build: None,
             build_detail_sheet_open: false,
+
+            device_right_pane: DeviceRightPane::Info,
+            device_region_query: String::new(),
+            last_connected_device_id: None,
 
             edit_decrypt_paths_inline: false,
             licenses_sheet_open: false,
@@ -417,7 +424,8 @@ impl eframe::App for BloomApp {
         let theme = theme_from_ui(ui);
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (is_busy, db_syncing, connected_devices): (
+        let (is_busy, db_syncing, update_checking, connected_devices): (
+            bool,
             bool,
             bool,
             Vec<ConnectedSamsungDevice>,
@@ -425,23 +433,22 @@ impl eframe::App for BloomApp {
             Ok(g) => (
                 g.is_busy(),
                 g.device_db_syncing,
+                g.device_updates.values().any(|u| u.loading),
                 g.connected_devices.clone(),
             ),
-            Err(_) => (false, false, Vec::new()),
+            Err(_) => (false, false, false, Vec::new()),
         };
 
-        if is_busy || db_syncing {
+        if is_busy || db_syncing || update_checking {
             ui.ctx()
                 .request_repaint_after(Duration::from_millis(120));
         }
 
-        if cfg!(windows) {
-            if self.last_usb_scan.elapsed() >= Duration::from_secs(3) {
-                self.last_usb_scan = Instant::now();
-                spawn_scan_usb_devices(&self.rt, Arc::clone(&self.shared), ui.ctx().clone());
-            }
-            ui.ctx().request_repaint_after(Duration::from_secs(3));
+        if self.last_usb_scan.elapsed() >= Duration::from_secs(3) {
+            self.last_usb_scan = Instant::now();
+            spawn_scan_adb_devices(&self.rt, Arc::clone(&self.shared), ui.ctx().clone());
         }
+        ui.ctx().request_repaint_after(Duration::from_secs(3));
 
         // Fall back to Browse if the currently open connected phone is unplugged.
         if self.page_id >= CONNECTED_DEVICE_PAGE_BASE
@@ -524,26 +531,34 @@ impl eframe::App for BloomApp {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ui, |ui| {
-                let scaffold_resp = TwoUiScaffold::new("bloom_scaffold", &page_title)
+                let scaffold_id = if active_connected_idx.is_some() {
+                    "bloom_connected_scaffold"
+                } else {
+                    "bloom_scaffold"
+                };
+                let mut scaffold = TwoUiScaffold::new(scaffold_id, &page_title)
                     .nav_button(ScaffoldNavButton::DrawerMenu)
-                    .window_controls(true)
-                    .show(
-                        ui,
-                        |_toolbar_ui| {},
-                        |ui| {
-                            if let Some(idx) = active_connected_idx {
-                                self.render_connected_device_page(ui, &connected_devices[idx]);
-                            } else {
-                                match current_page {
-                                    BloomPage::Browse => self.render_browse_page(ui),
-                                    BloomPage::Decrypt => self.render_decrypt_page(ui),
-                                    BloomPage::Settings => self.render_settings_page(ui),
-                                    BloomPage::About => self.render_about_page(ui),
-                                }
+                    .window_controls(true);
+                if active_connected_idx.is_some() {
+                    scaffold = scaffold.extended_height(0.0).max_content_width(Some(980.0));
+                }
+                let scaffold_resp = scaffold.show(
+                    ui,
+                    |_toolbar_ui| {},
+                    |ui| {
+                        if let Some(idx) = active_connected_idx {
+                            self.render_connected_device_page(ui, &connected_devices[idx]);
+                        } else {
+                            match current_page {
+                                BloomPage::Browse => self.render_browse_page(ui),
+                                BloomPage::Decrypt => self.render_decrypt_page(ui),
+                                BloomPage::Settings => self.render_settings_page(ui),
+                                BloomPage::About => self.render_about_page(ui),
                             }
                             ui.add_space(28.0);
-                        },
-                    );
+                        }
+                    },
+                );
 
                 if scaffold_resp.nav_clicked {
                     self.drawer_open = !self.drawer_open;

@@ -603,7 +603,7 @@ impl BloomApp {
         crate::tasks::spawn_sync_galaxy_db(&self.rt, self.shared.clone(), ctx.clone(), force_rebuild);
     }
 
-    fn fetch_builds_for_selection(
+    pub(crate) fn fetch_builds_for_selection(
         &self,
         dev: &GalaxyDevice,
         region: &CscItem,
