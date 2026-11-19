@@ -3,17 +3,17 @@ use bloom_core::{
     DecodedBuildCode, FirmwareUpdateType, GalaxyDevice,
 };
 use egui::{
-    pos2, vec2, Align, Color32, CornerRadius, Frame, Layout, Margin, Rect, RichText, Sense, Stroke,
-    StrokeKind, Ui,
+    pos2, vec2, Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Rect, RichText, Sense,
+    Stroke, StrokeKind, Ui,
 };
 use egui_twoui::prelude::*;
+use egui_twoui::tokens::dimens;
 
 use crate::state::{
     extract_android_number, short_build_tail, BloomPage, DeviceRenderState, DeviceRightPane,
     DeviceUpdateState,
 };
 use crate::tasks::{spawn_check_device_update, spawn_fetch_device_render};
-use crate::widgets::key_value_row;
 use crate::BloomApp;
 
 enum SplashHeroState {
@@ -175,6 +175,18 @@ impl BloomApp {
                 (!saved.is_empty()).then(|| saved.to_ascii_uppercase())
             })
             .unwrap_or_else(|| fallback_csc_for_model(&dev.model).to_owned())
+    }
+
+    fn resolve_device_csc_item(&self, dev: &ConnectedSamsungDevice) -> CscItem {
+        let code = self.effective_device_csc(dev);
+        self.csc_db
+            .find_exact(&code)
+            .cloned()
+            .unwrap_or_else(|| CscItem {
+                code,
+                countries: Vec::new(),
+                carriers: Vec::new(),
+            })
     }
 
     pub fn render_connected_device_page(&mut self, ui: &mut Ui, dev: &ConnectedSamsungDevice) {
@@ -339,118 +351,154 @@ impl BloomApp {
             ui.ctx().request_repaint();
         }
 
-        // Splash card containing only the phone render.
+        let device_heading = catalog_dev
+            .map(|c| c.marketing_name.as_str())
+            .unwrap_or_else(|| dev.display_title());
+
+        // Splash card with device render + centered device identity directly below the render.
         CardSection::new()
-            .inner_margin(Margin::symmetric(20, 24))
+            .inner_margin(Margin::symmetric(20, 22))
             .show(ui, |ui| {
-                ui.vertical_centered(|ui| match &hero_state {
-                    SplashHeroState::Texture(tex) => {
-                        paint_official_render_hero(ui, tex);
+                ui.vertical_centered(|ui| {
+                    match &hero_state {
+                        SplashHeroState::Texture(tex) => {
+                            paint_official_render_hero(ui, tex);
+                        }
+                        SplashHeroState::Loading => {
+                            paint_loading_splash_hero(ui);
+                        }
+                        SplashHeroState::Fallback => {
+                            paint_galaxy_splash_hero(ui, &theme, build_tail);
+                        }
                     }
-                    SplashHeroState::Loading => {
-                        paint_loading_splash_hero(ui);
-                    }
-                    SplashHeroState::Fallback => {
-                        paint_galaxy_splash_hero(ui, &theme, build_tail);
+
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(device_heading)
+                            .font(font_id(ui, 17.5, TwoUiFontWeight::SemiBold))
+                            .color(p.text_primary),
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(&dev.model)
+                            .font(font_id(ui, 13.5, TwoUiFontWeight::Medium))
+                            .color(p.text_muted),
+                    );
+                    if let Some(serial) = dev.effective_serial() {
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(serial)
+                                .font(font_id(ui, 12.5, TwoUiFontWeight::Regular))
+                                .color(p.text_muted),
+                        );
                     }
                 });
             });
 
-        ui.add_space(14.0);
+        ui.add_space(8.0);
 
-        // Device name, model, and serial centered directly beneath the splash card.
-        let device_heading = catalog_dev
-            .map(|c| c.marketing_name.as_str())
-            .unwrap_or_else(|| dev.display_title());
-        ui.vertical_centered(|ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
-            ui.label(
-                RichText::new(device_heading)
-                    .font(font_id(ui, 17.5, TwoUiFontWeight::SemiBold))
-                    .color(p.text_primary),
-            );
-            ui.label(
-                RichText::new(&dev.model)
-                    .font(font_id(ui, 13.5, TwoUiFontWeight::Medium))
-                    .color(p.text_muted),
-            );
-            if let Some(serial) = dev.effective_serial() {
-                ui.label(
-                    RichText::new(serial)
-                        .font(font_id(ui, 12.5, TwoUiFontWeight::Regular))
-                        .color(p.text_muted),
+        // Fixed-height reserved slot below the splash card so buttons below never shift vertically.
+        let status_w = ui.available_width().max(120.0);
+        let (slot_rect, slot_resp) = ui.allocate_exact_size(vec2(status_w, 42.0), Sense::hover());
+        if ui.is_rect_visible(slot_rect) && !update_state.loading && update_state.checked {
+            let wrap_w = (status_w - 8.0).max(80.0);
+            if update_state.update_available {
+                let g1 = ui.painter().layout(
+                    "Update available".to_owned(),
+                    font_id(ui, 14.5, TwoUiFontWeight::SemiBold),
+                    p.text_primary,
+                    wrap_w,
+                );
+                let g2 = update_state.latest_build.as_ref().map(|latest| {
+                    ui.painter().layout(
+                        latest.clone(),
+                        font_id(ui, 12.5, TwoUiFontWeight::Regular),
+                        p.text_muted,
+                        wrap_w,
+                    )
+                });
+                let total_h = g1.size().y + g2.as_ref().map_or(0.0, |g| 2.0 + g.size().y);
+                let top_y = slot_rect.center().y - total_h * 0.5;
+                let g1_h = g1.size().y;
+                ui.painter().galley(
+                    pos2(slot_rect.center().x - g1.size().x * 0.5, top_y),
+                    g1,
+                    p.text_primary,
+                );
+                if let Some(g2) = g2 {
+                    ui.painter().galley(
+                        pos2(slot_rect.center().x - g2.size().x * 0.5, top_y + g1_h + 2.0),
+                        g2,
+                        p.text_muted,
+                    );
+                }
+            } else if let Some(ref err) = update_state.error {
+                let g = ui.painter().layout(
+                    "Check failed".to_owned(),
+                    font_id(ui, 14.0, TwoUiFontWeight::Medium),
+                    p.text_muted,
+                    wrap_w,
+                );
+                ui.painter().galley(
+                    pos2(
+                        slot_rect.center().x - g.size().x * 0.5,
+                        slot_rect.center().y - g.size().y * 0.5,
+                    ),
+                    g,
+                    p.text_muted,
+                );
+                let _ = slot_resp.on_hover_text(err);
+            } else {
+                let g = ui.painter().layout(
+                    "Your software is up to date".to_owned(),
+                    font_id(ui, 14.0, TwoUiFontWeight::Medium),
+                    p.text_secondary,
+                    wrap_w,
+                );
+                ui.painter().galley(
+                    pos2(
+                        slot_rect.center().x - g.size().x * 0.5,
+                        slot_rect.center().y - g.size().y * 0.5,
+                    ),
+                    g,
+                    p.text_secondary,
                 );
             }
-        });
+        }
 
-        ui.add_space(10.0);
-
-        // Reserved gap below device identity for update status messages.
-        let status_w = ui.available_width().max(120.0);
-        ui.allocate_ui_with_layout(
-            vec2(status_w, 44.0),
-            Layout::top_down(Align::Center),
-            |ui| {
-                ui.set_width(status_w);
-                if !update_state.loading && update_state.checked {
-                    if update_state.update_available {
-                        ui.label(
-                            RichText::new("Update available")
-                                .font(font_id(ui, 14.5, TwoUiFontWeight::SemiBold))
-                                .color(p.text_primary),
-                        );
-                        if let Some(ref latest) = update_state.latest_build {
-                            ui.label(
-                                RichText::new(latest)
-                                    .font(font_id(ui, 12.5, TwoUiFontWeight::Regular))
-                                    .color(p.text_muted),
-                            );
-                        }
-                    } else if let Some(ref err) = update_state.error {
-                        let resp = ui.label(
-                            RichText::new("Check failed")
-                                .font(font_id(ui, 14.0, TwoUiFontWeight::Medium))
-                                .color(p.text_muted),
-                        );
-                        let _ = resp.on_hover_text(err);
-                    } else {
-                        ui.label(
-                            RichText::new("Your software is up to date")
-                                .font(font_id(ui, 14.0, TwoUiFontWeight::Medium))
-                                .color(p.text_secondary),
-                        );
-                    }
-                }
-            },
-        );
-
-        ui.add_space(8.0);
+        ui.add_space(6.0);
 
         let show_update_now =
             update_state.checked && update_state.update_available && !update_state.loading;
 
-        if show_update_now {
-            if ui
-                .add(
-                    TwoUiButton::contained_primary("Update now")
-                        .icon(TwoUiIcon::DownloadCircleOutline)
-                        .fill_width(true),
-                )
+        let mut open_region_picker = false;
+        let mut run_check_update = false;
+        let mut open_version_history = false;
+
+        ui.vertical_centered(|ui| {
+            if show_update_now {
+                if ui.add(TwoUiButton::contained_primary("Update now")).clicked() {
+                    open_region_picker = true;
+                }
+            } else if ui
+                .add(TwoUiButton::contained_primary("Check Update").loading(update_state.loading))
                 .clicked()
+                && !update_state.loading
             {
-                self.device_right_pane = DeviceRightPane::RegionPicker;
-                self.device_region_query.clear();
+                run_check_update = true;
             }
-        } else if ui
-            .add(
-                TwoUiButton::contained_primary("Check Update")
-                    .icon(TwoUiIcon::Refresh)
-                    .loading(update_state.loading)
-                    .fill_width(true),
-            )
-            .clicked()
-            && !update_state.loading
-        {
+
+            ui.add_space(10.0);
+            if ui.add(TwoUiButton::new("Version history")).clicked() {
+                open_version_history = true;
+            }
+        });
+
+        if open_region_picker {
+            self.device_right_pane = DeviceRightPane::RegionPicker;
+            self.device_region_query.clear();
+        }
+        if run_check_update {
             let target_region = self.effective_device_csc(dev);
             spawn_check_device_update(
                 &self.rt,
@@ -463,6 +511,18 @@ impl BloomApp {
                 self.changelog_lang(),
                 true,
             );
+        }
+        if open_version_history {
+            let target = target_galaxy_device(dev, catalog_dev);
+            let region = self.resolve_device_csc_item(dev);
+            self.selected_my_device = Some(target.clone());
+            self.selected_my_region = Some(region.clone());
+            self.config.model = target.model.clone();
+            self.config.csc = region.code.clone();
+            self.device_right_pane = DeviceRightPane::Info;
+            self.device_region_query.clear();
+            self.page_id = BloomPage::Browse.id();
+            self.fetch_builds_for_selection(&target, &region, ui.ctx());
         }
     }
 
@@ -501,9 +561,12 @@ impl BloomApp {
         CardSection::new()
             .inner_margin(Margin::symmetric(0, 6))
             .show(ui, |ui| {
-                key_value_row(ui, "Device name", dev.display_title(), false);
-                paint_divider(ui, DividerInset::Standard);
-                key_value_row(ui, "Connection", dev.transport.label(), false);
+                ui.add(CardItem::new("Device name").summary(dev.display_title()));
+                ui.add(
+                    CardItem::new("Connection")
+                        .summary(dev.transport.label())
+                        .top_divider(true),
+                );
             });
 
         // 2. Software information
@@ -555,31 +618,34 @@ impl BloomApp {
                 let mut has_rows = false;
 
                 if let Some(one_ui) = one_ui_val {
-                    key_value_row(ui, "One UI version", one_ui, false);
+                    ui.add(
+                        CardItem::new("One UI version")
+                            .summary(one_ui)
+                            .top_divider(has_rows),
+                    );
                     has_rows = true;
                 }
 
                 if let Some(ref android) = android_val {
-                    if has_rows {
-                        paint_divider(ui, DividerInset::Standard);
-                    }
-                    key_value_row(ui, "Android version", android, false);
+                    ui.add(
+                        CardItem::new("Android version")
+                            .summary(android)
+                            .top_divider(has_rows),
+                    );
                     has_rows = true;
                 }
 
                 if let Some(ref patch) = dev.security_patch {
-                    if has_rows {
-                        paint_divider(ui, DividerInset::Standard);
-                    }
-                    key_value_row(ui, "Security patch", patch, false);
+                    ui.add(
+                        CardItem::new("Security patch")
+                            .summary(patch)
+                            .top_divider(has_rows),
+                    );
                     has_rows = true;
                 }
 
                 if let Some(fw) = build_str {
-                    if has_rows {
-                        paint_divider(ui, DividerInset::Standard);
-                    }
-                    key_value_row(ui, "Build", fw, false);
+                    ui.add(CardItem::new("Build").summary(fw).top_divider(has_rows));
                     has_rows = true;
                 }
 
@@ -593,44 +659,46 @@ impl BloomApp {
                 {
                     open_whats_new = true;
                 }
-                has_rows = true;
 
                 if let Some(ref csc_val) = csc_str {
-                    paint_divider(ui, DividerInset::Standard);
-                    key_value_row(ui, "CSC", csc_val, false);
+                    ui.add(CardItem::new("CSC").summary(csc_val).top_divider(true));
                 }
 
                 if let Some(ref bin_val) = binary_str {
-                    paint_divider(ui, DividerInset::Standard);
-                    key_value_row(ui, "Binary", bin_val, false);
+                    ui.add(CardItem::new("Binary").summary(bin_val).top_divider(true));
                 }
 
                 if let Some(ref rev_val) = revision_str {
-                    paint_divider(ui, DividerInset::Standard);
-                    key_value_row(ui, "Revision", rev_val, false);
+                    ui.add(CardItem::new("Revision").summary(rev_val).top_divider(true));
                 }
 
                 if let Some(ref sp_val) = dev.csc_build {
-                    paint_divider(ui, DividerInset::Standard);
-                    key_value_row(ui, "Service provider", sp_val, false);
+                    ui.add(
+                        CardItem::new("Service provider")
+                            .summary(sp_val)
+                            .top_divider(true),
+                    );
                 }
 
                 if let Some(ref cp_val) = dev.cp_build {
-                    paint_divider(ui, DividerInset::Standard);
-                    key_value_row(ui, "Baseband", cp_val, false);
+                    ui.add(CardItem::new("Baseband").summary(cp_val).top_divider(true));
                 }
 
                 if let Some(ref upd_val) = update_type_str {
-                    paint_divider(ui, DividerInset::Standard);
-                    key_value_row(ui, "Update type", upd_val, false);
+                    ui.add(
+                        CardItem::new("Update type")
+                            .summary(upd_val)
+                            .top_divider(true),
+                    );
                 }
 
                 if let Some(ref rel_val) = release_date_str {
-                    paint_divider(ui, DividerInset::Standard);
-                    key_value_row(ui, "Release date", rel_val, false);
+                    ui.add(
+                        CardItem::new("Release date")
+                            .summary(rel_val)
+                            .top_divider(true),
+                    );
                 }
-
-                let _ = has_rows;
             });
 
         if open_whats_new {
@@ -676,21 +744,24 @@ impl BloomApp {
                         Frame::NONE
                             .inner_margin(Margin::symmetric(20, 12))
                             .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 8.0;
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new("Battery status")
-                                            .font(font_id(ui, 13.5, TwoUiFontWeight::Regular))
-                                            .color(p.text_muted),
-                                    );
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        ui.label(
-                                            RichText::new(status_val)
-                                                .font(font_id(ui, 13.5, TwoUiFontWeight::Medium))
-                                                .color(p.text_primary),
-                                        );
-                                    });
-                                });
+                                ui.spacing_mut().item_spacing.y = 6.0;
+                                ui.label(
+                                    RichText::new("Battery status")
+                                        .font(FontId::new(
+                                            dimens::TEXT_LIST_PRIMARY,
+                                            FontFamily::Proportional,
+                                        ))
+                                        .color(p.text_primary),
+                                );
+                                ui.label(
+                                    RichText::new(status_val)
+                                        .font(FontId::new(
+                                            dimens::TEXT_LIST_SECONDARY,
+                                            FontFamily::Proportional,
+                                        ))
+                                        .color(p.text_muted),
+                                );
+                                ui.add_space(2.0);
                                 let frac = (f32::from(pct.min(100)) / 100.0).clamp(0.0, 1.0);
                                 ui.add(
                                     TwoUiProgressBar::determinate(frac)
@@ -702,73 +773,70 @@ impl BloomApp {
                     }
 
                     if let Some(mah) = dev.battery_capacity_typical_mah {
-                        if has_bat_rows {
-                            paint_divider(ui, DividerInset::Standard);
-                        }
-                        key_value_row(
-                            ui,
-                            "Battery capacity (typical)",
-                            &format!("{mah} mAh"),
-                            false,
+                        ui.add(
+                            CardItem::new("Battery capacity (typical)")
+                                .summary(format!("{mah} mAh"))
+                                .top_divider(has_bat_rows),
                         );
                         has_bat_rows = true;
                     }
 
                     if let Some(health) = dev.battery_health_percent {
-                        if has_bat_rows {
-                            paint_divider(ui, DividerInset::Standard);
-                        }
-                        key_value_row(ui, "Battery health", &format!("{health}%"), false);
+                        ui.add(
+                            CardItem::new("Battery health")
+                                .summary(format!("{health}%"))
+                                .top_divider(has_bat_rows),
+                        );
                         has_bat_rows = true;
                     }
 
                     if let Some(cycles) = dev.battery_cycle_count {
-                        if has_bat_rows {
-                            paint_divider(ui, DividerInset::Standard);
-                        }
-                        key_value_row(ui, "Battery cycle count", &format!("{cycles}"), false);
+                        ui.add(
+                            CardItem::new("Battery cycle count")
+                                .summary(format!("{cycles}"))
+                                .top_divider(has_bat_rows),
+                        );
                         has_bat_rows = true;
                     }
 
                     if let Some(ref mfg_date) = dev.battery_manufacture_date {
-                        if has_bat_rows {
-                            paint_divider(ui, DividerInset::Standard);
-                        }
-                        key_value_row(ui, "Manufacture date", mfg_date, false);
+                        ui.add(
+                            CardItem::new("Manufacture date")
+                                .summary(mfg_date)
+                                .top_divider(has_bat_rows),
+                        );
                         has_bat_rows = true;
                     }
 
                     if let Some(ref first_date) = dev.battery_first_use_date {
-                        if has_bat_rows {
-                            paint_divider(ui, DividerInset::Standard);
-                        }
-                        key_value_row(ui, "First use date", first_date, false);
+                        ui.add(
+                            CardItem::new("First use date")
+                                .summary(first_date)
+                                .top_divider(has_bat_rows),
+                        );
                         has_bat_rows = true;
                     }
 
                     if let Some(temp) = dev.battery_temp_tenths_c {
-                        if has_bat_rows {
-                            paint_divider(ui, DividerInset::Standard);
-                        }
-                        key_value_row(
-                            ui,
-                            "Temperature",
-                            &format!("{:.1} °C", f64::from(temp) / 10.0),
-                            false,
+                        ui.add(
+                            CardItem::new("Temperature")
+                                .summary(format!("{:.1} °C", f64::from(temp) / 10.0))
+                                .top_divider(has_bat_rows),
                         );
                         has_bat_rows = true;
                     }
 
                     if let Some(ma) = dev.battery_current_ma {
-                        if has_bat_rows {
-                            paint_divider(ui, DividerInset::Standard);
-                        }
                         let cur_str = if ma > 0 {
                             format!("+{ma} mA")
                         } else {
                             format!("{ma} mA")
                         };
-                        key_value_row(ui, "Current", &cur_str, false);
+                        ui.add(
+                            CardItem::new("Current")
+                                .summary(cur_str)
+                                .top_divider(has_bat_rows),
+                        );
                     }
                 });
         }
@@ -782,23 +850,18 @@ impl BloomApp {
                     let mut has_hw_row = false;
                     if let Some(ref knox) = dev.knox_warranty_bit {
                         let is_official = knox == "0x0" || knox == "0";
-                        key_value_row(
-                            ui,
-                            "Knox",
-                            if is_official { "Official" } else { "Tripped" },
-                            false,
-                        );
+                        ui.add(CardItem::new("Knox").summary(if is_official {
+                            "Official"
+                        } else {
+                            "Tripped"
+                        }));
                         has_hw_row = true;
                     }
                     if let Some(locked) = dev.bootloader_locked {
-                        if has_hw_row {
-                            paint_divider(ui, DividerInset::Standard);
-                        }
-                        key_value_row(
-                            ui,
-                            "Bootloader",
-                            if locked { "Locked" } else { "Unlocked" },
-                            false,
+                        ui.add(
+                            CardItem::new("Bootloader")
+                                .summary(if locked { "Locked" } else { "Unlocked" })
+                                .top_divider(has_hw_row),
                         );
                     }
                 });
@@ -811,16 +874,10 @@ impl BloomApp {
             let mut do_decrypt = false;
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
-                if ui
-                    .add(TwoUiButton::new("Copy Build").icon(TwoUiIcon::Copy))
-                    .clicked()
-                {
+                if ui.add(TwoUiButton::new("Copy Build")).clicked() {
                     do_copy = true;
                 }
-                if ui
-                    .add(TwoUiButton::new("Decrypt").icon(TwoUiIcon::SecurityOutline))
-                    .clicked()
-                {
+                if ui.add(TwoUiButton::new("Decrypt")).clicked() {
                     do_decrypt = true;
                 }
             });
