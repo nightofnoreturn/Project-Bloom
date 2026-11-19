@@ -22,7 +22,9 @@ const TELEMETRY_SHELL_CMD: &str = concat!(
     "echo \"BLOOM_PROPS_BEGIN\"; ",
     "getprop; ",
     "echo \"BLOOM_BATTERY_BEGIN\"; ",
-    "dumpsys battery"
+    "dumpsys battery; ",
+    "echo \"BLOOM_BATTSTATS_BEGIN\"; ",
+    "dumpsys batterystats --charged 2>/dev/null | grep -E 'Typical:|Estimated battery capacity:' | head -n 4"
 );
 
 static LAST_ADB_START_ATTEMPT: Mutex<Option<Instant>> = Mutex::new(None);
@@ -140,6 +142,11 @@ pub struct ConnectedSamsungDevice {
     pub battery_temp_tenths_c: Option<i32>,
     pub battery_voltage_mv: Option<u32>,
     pub battery_health_percent: Option<u8>,
+    pub battery_capacity_typical_mah: Option<u32>,
+    pub battery_cycle_count: Option<u32>,
+    pub battery_manufacture_date: Option<String>,
+    pub battery_first_use_date: Option<String>,
+    pub battery_current_ma: Option<i32>,
 }
 
 impl ConnectedSamsungDevice {
@@ -461,7 +468,93 @@ fn parse_getprop_line(line: &str) -> Option<(String, String)> {
     }
 }
 
-/// Parses the combined `settings` + `getprop` + `dumpsys battery` ADB telemetry block.
+fn parse_bracketed_u32(raw: &str) -> Option<u32> {
+    raw.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+fn format_yyyymmdd(raw: &str) -> Option<String> {
+    let clean = raw
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
+    if clean.len() == 8 && clean.bytes().all(|b| b.is_ascii_digit()) {
+        Some(format!("{}-{}-{}", &clean[..4], &clean[4..6], &clean[6..8]))
+    } else {
+        None
+    }
+}
+
+/// Decodes Samsung's `[SS][BattInfo]QrData efsValue` serial (e.g. `GH43-05193A+DL1YA22AS+01294N` -> `2025-10-22`).
+pub fn decode_samsung_battery_qr_date(qr: &str) -> Option<String> {
+    let part = qr.trim().split('+').nth(1)?.trim();
+    let bytes = part.as_bytes();
+    if bytes.len() < 7 || !part.is_ascii() {
+        return None;
+    }
+    let year = match bytes[3] {
+        b'H' => 2016,
+        b'J' => 2017,
+        b'K' => 2018,
+        b'M' => 2019,
+        b'N' => 2020,
+        b'R' => 2021,
+        b'T' => 2022,
+        b'W' => 2023,
+        b'X' => 2024,
+        b'Y' => 2025,
+        b'Z' => 2026,
+        _ => return None,
+    };
+    let month: u8 = match bytes[4] {
+        b'1'..=b'9' => bytes[4] - b'0',
+        b'A' => 10,
+        b'B' => 11,
+        b'C' => 12,
+        _ => return None,
+    };
+    let day_str = std::str::from_utf8(&bytes[5..7]).ok()?;
+    let day: u8 = day_str.parse().ok()?;
+    if !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+fn parse_typical_capacity_from_line(line: &str) -> Option<(bool, u32)> {
+    if let Some((_, rest)) = line.split_once("Typical:") {
+        let num_str: String = rest
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(mah) = num_str.parse::<u32>() {
+            if mah > 0 {
+                return Some((true, mah));
+            }
+        }
+    }
+    if let Some((_, rest)) = line.split_once("Estimated battery capacity:") {
+        let num_str: String = rest
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(mah) = num_str.parse::<u32>() {
+            if mah > 0 {
+                return Some((false, mah));
+            }
+        }
+    }
+    None
+}
+
+/// Parses the combined `settings` + `getprop` + `dumpsys battery` + `batterystats` ADB telemetry block.
 pub fn parse_adb_telemetry_output(
     device_id: &str,
     transport: AdbTransport,
@@ -472,6 +565,7 @@ pub fn parse_adb_telemetry_output(
         Header,
         Props,
         Battery,
+        BattStats,
     }
 
     let mut section = Section::Header;
@@ -487,7 +581,17 @@ pub fn parse_adb_telemetry_output(
     let mut battery_powered = false;
     let mut battery_temp_tenths_c: Option<i32> = None;
     let mut battery_voltage_mv: Option<u32> = None;
-    let mut battery_health_percent: Option<u8> = None;
+    let mut battery_current_ma: Option<i32> = None;
+    let mut asoc_health: Option<u8> = None;
+    let mut bsoh_health: Option<u8> = None;
+    let mut usage_cycles: Option<u32> = None;
+    let mut efs_cycles: Option<u32> = None;
+    let mut battery_first_use_date: Option<String> = None;
+    let mut llb_man_date: Option<String> = None;
+    let mut llb_cal_date: Option<String> = None;
+    let mut qr_man_date: Option<String> = None;
+    let mut typical_capacity_mah: Option<u32> = None;
+    let mut est_capacity_mah: Option<u32> = None;
 
     for line in raw.lines() {
         let trimmed = line.trim();
@@ -497,6 +601,10 @@ pub fn parse_adb_telemetry_output(
         }
         if trimmed == "BLOOM_BATTERY_BEGIN" {
             section = Section::Battery;
+            continue;
+        }
+        if trimmed == "BLOOM_BATTSTATS_BEGIN" {
+            section = Section::BattStats;
             continue;
         }
 
@@ -520,13 +628,60 @@ pub fn parse_adb_telemetry_output(
                 }
             }
             Section::Battery => {
-                if let Some(raw_soh) = trimmed.strip_prefix("mSavedBatteryBsoh:") {
-                    if let Ok(v) = raw_soh.trim().parse::<u32>() {
+                if let Some(raw_asoc) = trimmed.strip_prefix("mSavedBatteryAsoc:") {
+                    if let Some(v) = parse_bracketed_u32(raw_asoc) {
                         if (1..=100).contains(&v) {
-                            battery_health_percent = Some(v as u8);
+                            asoc_health = Some(v as u8);
                         }
                     }
+                } else if let Some((_, raw_asoc)) = trimmed.split_once("AsocData efsValue:") {
+                    if asoc_health.is_none() {
+                        if let Some(v) = parse_bracketed_u32(raw_asoc) {
+                            if (1..=100).contains(&v) {
+                                asoc_health = Some(v as u8);
+                            }
+                        }
+                    }
+                } else if let Some(raw_soh) = trimmed.strip_prefix("mSavedBatteryBsoh:") {
+                    if let Some(v) = parse_bracketed_u32(raw_soh) {
+                        if (1..=100).contains(&v) {
+                            bsoh_health = Some(v as u8);
+                        }
+                    }
+                } else if let Some(raw_usage) = trimmed.strip_prefix("mSavedBatteryUsage:") {
+                    if let Some(v) = parse_bracketed_u32(raw_usage) {
+                        usage_cycles = Some(v / 100);
+                    }
+                } else if let Some((_, raw_dl)) = trimmed.split_once("DischargeLevelData efsValue:")
+                {
+                    if let Some(v) = parse_bracketed_u32(raw_dl) {
+                        efs_cycles = Some(v / 100);
+                    }
+                } else if let Some(raw_first) = trimmed.strip_prefix("battery FirstUseDate:") {
+                    if let Some(d) = format_yyyymmdd(raw_first) {
+                        battery_first_use_date = Some(d);
+                    }
+                } else if let Some((_, raw_first)) = trimmed.split_once("FirstUseDateData efsValue:")
+                {
+                    if battery_first_use_date.is_none() {
+                        if let Some(d) = format_yyyymmdd(raw_first) {
+                            battery_first_use_date = Some(d);
+                        }
+                    }
+                } else if let Some(raw_man) = trimmed.strip_prefix("LLB MAN:") {
+                    if let Some(d) = format_yyyymmdd(raw_man) {
+                        llb_man_date = Some(d);
+                    }
+                } else if let Some(raw_cal) = trimmed.strip_prefix("LLB CAL:") {
+                    if let Some(d) = format_yyyymmdd(raw_cal) {
+                        llb_cal_date = Some(d);
+                    }
+                } else if let Some((_, raw_qr)) = trimmed.split_once("QrData efsValue:") {
+                    if let Some(d) = decode_samsung_battery_qr_date(raw_qr) {
+                        qr_man_date = Some(d);
+                    }
                 }
+
                 if trimmed.starts_with('[')
                     || trimmed.starts_with("mBatteryChangedConditionCounts")
                     || trimmed.starts_with("EFS Factory")
@@ -576,7 +731,23 @@ pub fn parse_adb_telemetry_output(
                                 }
                             }
                         }
+                        "current now" => {
+                            if let Ok(ma) = val.parse::<i32>() {
+                                battery_current_ma = Some(ma);
+                            }
+                        }
                         _ => {}
+                    }
+                }
+            }
+            Section::BattStats => {
+                if let Some((is_typical, mah)) = parse_typical_capacity_from_line(trimmed) {
+                    if is_typical {
+                        if typical_capacity_mah.is_none() {
+                            typical_capacity_mah = Some(mah);
+                        }
+                    } else if est_capacity_mah.is_none() {
+                        est_capacity_mah = Some(mah);
                     }
                 }
             }
@@ -715,6 +886,17 @@ pub fn parse_adb_telemetry_output(
         _ => None,
     };
 
+    let battery_health_percent = asoc_health.or(bsoh_health);
+    let battery_cycle_count = usage_cycles.or(efs_cycles);
+    let battery_capacity_typical_mah = typical_capacity_mah.or(est_capacity_mah);
+    let battery_manufacture_date = llb_man_date
+        .or(qr_man_date)
+        .or(llb_cal_date)
+        .or_else(|| {
+            first_non_empty_prop(&props, &["ril.rfcal_date", "ril.rfcal_date2"])
+                .and_then(|s| format_yyyymmdd(&s))
+        });
+
     Some(ConnectedSamsungDevice {
         device_id: device_id.to_owned(),
         connection_mode: DeviceConnectionMode::AdbReady,
@@ -750,6 +932,11 @@ pub fn parse_adb_telemetry_output(
         battery_temp_tenths_c,
         battery_voltage_mv,
         battery_health_percent,
+        battery_capacity_typical_mah,
+        battery_cycle_count,
+        battery_manufacture_date,
+        battery_first_use_date,
+        battery_current_ma,
     })
 }
 
@@ -1228,6 +1415,11 @@ pub fn merge_and_deduplicate_devices(
             battery_temp_tenths_c: None,
             battery_voltage_mv: None,
             battery_health_percent: None,
+            battery_capacity_typical_mah: None,
+            battery_cycle_count: None,
+            battery_manufacture_date: None,
+            battery_first_use_date: None,
+            battery_current_ma: None,
         });
     }
 
@@ -1303,6 +1495,11 @@ mod tests {
             battery_temp_tenths_c: None,
             battery_voltage_mv: None,
             battery_health_percent: None,
+            battery_capacity_typical_mah: None,
+            battery_cycle_count: None,
+            battery_manufacture_date: None,
+            battery_first_use_date: None,
+            battery_current_ma: None,
         }
     }
 
@@ -1413,8 +1610,19 @@ Current Battery Service state:
   scale: 100
   voltage: 4266
   temperature: 359
+  current now: -117
+LLB CAL: 20251215
+LLB MAN:
+[BatteryInfo]
+  battery FirstUseDate: [20251225]
+  mSavedBatteryAsoc: [96]
+  mSavedBatteryUsage: [62798]
+11-18 18:23:06.354  [SS][BattInfo]QrData efsValue:GH43-05193A+DL1YA22AS+01294N
 [HiccupLogBuffer]
 mSavedBatteryBsoh: 92
+BLOOM_BATTSTATS_BEGIN
+  Estimated battery capacity: 3900 mAh
+    Capacity: 3900, Rated: 3880, Typical: 4000, Computed drain: 0, actual drain: 0
 "#;
 
         let dev = parse_adb_telemetry_output("RRGYC063QZR", AdbTransport::Usb, raw)
@@ -1436,7 +1644,12 @@ mSavedBatteryBsoh: 92
         assert_eq!(dev.bootloader_locked, Some(true));
         assert_eq!(dev.soc_model.as_deref(), Some("Samsung s5e9945"));
         assert_eq!(dev.battery_percent, Some(99));
-        assert_eq!(dev.battery_health_percent, Some(92));
+        assert_eq!(dev.battery_health_percent, Some(96));
+        assert_eq!(dev.battery_capacity_typical_mah, Some(4000));
+        assert_eq!(dev.battery_cycle_count, Some(627));
+        assert_eq!(dev.battery_manufacture_date.as_deref(), Some("2025-10-22"));
+        assert_eq!(dev.battery_first_use_date.as_deref(), Some("2025-12-25"));
+        assert_eq!(dev.battery_current_ma, Some(-117));
         assert!(dev.should_animate_battery_gradient());
     }
 

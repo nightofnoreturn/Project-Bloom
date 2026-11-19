@@ -190,6 +190,7 @@ pub struct BloomApp {
     pub known_connected_states: HashMap<String, bool>,
     pub non_adb_dialog_open: bool,
     pub non_adb_dialog_device: Option<ConnectedSamsungDevice>,
+    pub whats_new_dialog_open: bool,
 
     // Wireless ADB pairing state
     pub pair_tab_idx: usize,
@@ -304,6 +305,7 @@ impl BloomApp {
             known_connected_states: HashMap::new(),
             non_adb_dialog_open: false,
             non_adb_dialog_device: None,
+            whats_new_dialog_open: false,
 
             pair_tab_idx: 0,
             pair_qr_service,
@@ -604,35 +606,27 @@ impl eframe::App for BloomApp {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ui, |ui| {
-                let scaffold_id = if active_connected_idx.is_some() {
-                    "bloom_connected_scaffold"
-                } else {
-                    "bloom_scaffold"
-                };
-                let mut scaffold = TwoUiScaffold::new(scaffold_id, &page_title)
+                let scaffold_resp = TwoUiScaffold::new("bloom_scaffold", &page_title)
                     .nav_button(ScaffoldNavButton::DrawerMenu)
-                    .window_controls(true);
-                if active_connected_idx.is_some() {
-                    scaffold = scaffold.extended_height(0.0).max_content_width(Some(980.0));
-                }
-                let scaffold_resp = scaffold.show(
-                    ui,
-                    |_toolbar_ui| {},
-                    |ui| {
-                        if let Some(idx) = active_connected_idx {
-                            self.render_connected_device_page(ui, &connected_devices[idx]);
-                        } else {
-                            match current_page {
-                                BloomPage::Browse => self.render_browse_page(ui),
-                                BloomPage::Decrypt => self.render_decrypt_page(ui),
-                                BloomPage::Settings => self.render_settings_page(ui),
-                                BloomPage::About => self.render_about_page(ui),
-                                BloomPage::PairDevice => self.render_pair_device_page(ui),
+                    .window_controls(true)
+                    .show(
+                        ui,
+                        |_toolbar_ui| {},
+                        |ui| {
+                            if let Some(idx) = active_connected_idx {
+                                self.render_connected_device_page(ui, &connected_devices[idx]);
+                            } else {
+                                match current_page {
+                                    BloomPage::Browse => self.render_browse_page(ui),
+                                    BloomPage::Decrypt => self.render_decrypt_page(ui),
+                                    BloomPage::Settings => self.render_settings_page(ui),
+                                    BloomPage::About => self.render_about_page(ui),
+                                    BloomPage::PairDevice => self.render_pair_device_page(ui),
+                                }
                             }
                             ui.add_space(28.0);
-                        }
-                    },
-                );
+                        },
+                    );
 
                 if scaffold_resp.nav_clicked {
                     self.drawer_open = !self.drawer_open;
@@ -737,6 +731,12 @@ impl eframe::App for BloomApp {
         if !self.non_adb_dialog_open {
             self.non_adb_dialog_device = None;
         }
+
+        // What's new dialog for the connected device's currently installed build
+        self.render_whats_new_dialog(
+            ui.ctx(),
+            active_connected_idx.map(|idx| &connected_devices[idx]),
+        );
 
         // Open source licenses bottom sheet
         self.render_licenses_bottom_sheet(ui.ctx(), &theme);

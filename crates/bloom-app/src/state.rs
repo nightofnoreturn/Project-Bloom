@@ -155,7 +155,6 @@ pub struct WirelessPairState {
 pub enum DeviceRightPane {
     #[default]
     Info,
-    WhatsNew,
     RegionPicker,
 }
 

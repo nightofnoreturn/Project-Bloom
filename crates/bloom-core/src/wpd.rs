@@ -483,6 +483,11 @@ mod win_wpd {
                 battery_temp_tenths_c: None,
                 battery_voltage_mv: None,
                 battery_health_percent: None,
+                battery_capacity_typical_mah: None,
+                battery_cycle_count: None,
+                battery_manufacture_date: None,
+                battery_first_use_date: None,
+                battery_current_ma: None,
             })
         }
     }
