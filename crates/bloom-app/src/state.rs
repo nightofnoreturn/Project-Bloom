@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bloom_core::{ConnectedSamsungDevice, DeviceCatalog, HistoryItem, HistoryResult};
+use bloom_core::{
+    AdbMdnsService, ConnectedSamsungDevice, DeviceCatalog, HistoryItem, HistoryResult,
+};
 use egui::Color32;
 use egui_twoui::prelude::TwoUiIcon;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,7 @@ pub enum BloomPage {
     Decrypt,
     Settings,
     About,
+    PairDevice,
 }
 
 impl BloomPage {
@@ -32,6 +35,7 @@ impl BloomPage {
             1 => Self::Decrypt,
             2 => Self::Settings,
             3 => Self::About,
+            4 => Self::PairDevice,
             _ => Self::Browse,
         }
     }
@@ -42,6 +46,7 @@ impl BloomPage {
             Self::Decrypt => 1,
             Self::Settings => 2,
             Self::About => 3,
+            Self::PairDevice => 4,
         }
     }
 
@@ -52,6 +57,7 @@ impl BloomPage {
             Self::Decrypt => "Decrypt",
             Self::Settings => "Settings",
             Self::About => "About",
+            Self::PairDevice => "Pair Device",
         }
     }
 
@@ -61,6 +67,7 @@ impl BloomPage {
             Self::Decrypt => TwoUiIcon::SecurityOutline,
             Self::Settings => TwoUiIcon::SettingsOutline,
             Self::About => TwoUiIcon::InfoOutline,
+            Self::PairDevice => TwoUiIcon::QrCode,
         }
     }
 }
@@ -131,6 +138,17 @@ pub fn default_output_dir() -> String {
 pub enum SnackAction {
     OpenFolder(PathBuf),
     RestoreConfig(Box<AppConfig>),
+    ShowConnectedDevice(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WirelessPairState {
+    pub mdns_scanning: bool,
+    pub mdns_services: Vec<AdbMdnsService>,
+    pub pairing: bool,
+    pub connecting: bool,
+    pub last_success: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -167,6 +185,7 @@ pub struct SharedUiState {
     pub connected_devices: Vec<ConnectedSamsungDevice>,
     pub device_renders: HashMap<String, DeviceRenderState>,
     pub device_updates: HashMap<String, DeviceUpdateState>,
+    pub wireless_pair: WirelessPairState,
     pub device_db_syncing: bool,
     pub device_db_error: Option<String>,
     pub device_catalog: DeviceCatalog,

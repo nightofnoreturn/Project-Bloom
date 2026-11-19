@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bloom_core::{
-    default_device_cache_path, load_galaxy_cache, ConnectedSamsungDevice, CscDb, CscItem,
-    DeviceCatalog, GalaxyDevice, HistoryItem, ImeiDb,
+    default_device_cache_path, generate_adb_qr_session, load_galaxy_cache, ConnectedSamsungDevice,
+    CscDb, CscItem, DeviceCatalog, DeviceConnectionMode, GalaxyDevice, HistoryItem, ImeiDb,
 };
 use egui::{Frame, Id};
 use egui_twoui::prelude::*;
@@ -187,6 +187,20 @@ pub struct BloomApp {
     pub device_right_pane: DeviceRightPane,
     pub device_region_query: String,
     pub last_connected_device_id: Option<String>,
+    pub known_connected_states: HashMap<String, bool>,
+    pub non_adb_dialog_open: bool,
+    pub non_adb_dialog_device: Option<ConnectedSamsungDevice>,
+
+    // Wireless ADB pairing state
+    pub pair_tab_idx: usize,
+    pub pair_qr_service: String,
+    pub pair_qr_password: String,
+    pub pair_qr_payload: String,
+    pub pair_qr_triggered_addr: Option<String>,
+    pub pair_otp_address: String,
+    pub pair_otp_last_autofill: String,
+    pub pair_otp_code: String,
+    pub last_mdns_scan: Instant,
 
     // Other pages state
     pub edit_decrypt_paths_inline: bool,
@@ -255,6 +269,11 @@ impl BloomApp {
         };
 
         let color_draft = config.accent_color();
+        let (pair_qr_service, pair_qr_password, pair_qr_payload) = generate_adb_qr_session();
+        let initial_mdns_scan = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .unwrap_or_else(Instant::now);
+
         let app = Self {
             rt,
             shared,
@@ -282,6 +301,19 @@ impl BloomApp {
             device_right_pane: DeviceRightPane::Info,
             device_region_query: String::new(),
             last_connected_device_id: None,
+            known_connected_states: HashMap::new(),
+            non_adb_dialog_open: false,
+            non_adb_dialog_device: None,
+
+            pair_tab_idx: 0,
+            pair_qr_service,
+            pair_qr_password,
+            pair_qr_payload,
+            pair_qr_triggered_addr: None,
+            pair_otp_address: String::new(),
+            pair_otp_last_autofill: String::new(),
+            pair_otp_code: String::new(),
+            last_mdns_scan: initial_mdns_scan,
 
             edit_decrypt_paths_inline: false,
             licenses_sheet_open: false,
@@ -424,7 +456,8 @@ impl eframe::App for BloomApp {
         let theme = theme_from_ui(ui);
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (is_busy, db_syncing, update_checking, connected_devices): (
+        let (is_busy, db_syncing, update_checking, pairing_busy, connected_devices): (
+            bool,
             bool,
             bool,
             bool,
@@ -434,12 +467,13 @@ impl eframe::App for BloomApp {
                 g.is_busy(),
                 g.device_db_syncing,
                 g.device_updates.values().any(|u| u.loading),
+                g.wireless_pair.pairing || g.wireless_pair.connecting,
                 g.connected_devices.clone(),
             ),
-            Err(_) => (false, false, false, Vec::new()),
+            Err(_) => (false, false, false, false, Vec::new()),
         };
 
-        if is_busy || db_syncing || update_checking {
+        if is_busy || db_syncing || update_checking || pairing_busy {
             ui.ctx()
                 .request_repaint_after(Duration::from_millis(120));
         }
@@ -449,6 +483,27 @@ impl eframe::App for BloomApp {
             spawn_scan_adb_devices(&self.rt, Arc::clone(&self.shared), ui.ctx().clone());
         }
         ui.ctx().request_repaint_after(Duration::from_secs(3));
+
+        // Notify user via SuggestiveSnackBar when a Samsung device newly connects or enables ADB.
+        let newly_notifiable = connected_devices.iter().find(|d| {
+            let key = d.stable_identity_key();
+            match self.known_connected_states.get(&key) {
+                None => true,
+                Some(&was_adb_ready) => !was_adb_ready && d.is_adb_ready(),
+            }
+        });
+        if let Some(dev) = newly_notifiable {
+            self.show_snackbar_with_action(
+                ui.ctx(),
+                format!("{} connected", dev.display_title()),
+                Some("Show"),
+                SnackAction::ShowConnectedDevice(dev.stable_identity_key()),
+            );
+        }
+        self.known_connected_states = connected_devices
+            .iter()
+            .map(|d| (d.stable_identity_key(), d.is_adb_ready()))
+            .collect();
 
         // Fall back to Browse if the currently open connected phone is unplugged.
         if self.page_id >= CONNECTED_DEVICE_PAGE_BASE
@@ -462,7 +517,7 @@ impl eframe::App for BloomApp {
             .map(|d| d.battery_percent.map(|p| format!("{p}%")))
             .collect();
 
-        let mut entries: Vec<DrawerEntry<'_>> = Vec::with_capacity(connected_devices.len() + 6);
+        let mut entries: Vec<DrawerEntry<'_>> = Vec::with_capacity(connected_devices.len() + 7);
         for (idx, dev) in connected_devices.iter().enumerate() {
             let entry_id = CONNECTED_DEVICE_PAGE_BASE + idx;
             let entry = match device_badges[idx].as_deref() {
@@ -480,9 +535,12 @@ impl eframe::App for BloomApp {
             };
             entries.push(entry);
         }
-        if !connected_devices.is_empty() {
-            entries.push(DrawerEntry::DottedDivider);
-        }
+        entries.push(DrawerEntry::item(
+            BloomPage::PairDevice.id(),
+            BloomPage::PairDevice.title(),
+            BloomPage::PairDevice.icon(),
+        ));
+        entries.push(DrawerEntry::DottedDivider);
         entries.push(DrawerEntry::item(
             BloomPage::Browse.id(),
             BloomPage::Browse.title(),
@@ -505,16 +563,31 @@ impl eframe::App for BloomApp {
             BloomPage::About.icon(),
         ));
 
+        let prev_page_id = self.page_id;
         TwoUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
             ui,
             &mut self.drawer_open,
             None,
         );
 
+        if self.page_id >= CONNECTED_DEVICE_PAGE_BASE {
+            if let Some(dev) = connected_devices.get(self.page_id - CONNECTED_DEVICE_PAGE_BASE) {
+                if !dev.is_adb_ready() {
+                    self.page_id = if prev_page_id >= CONNECTED_DEVICE_PAGE_BASE {
+                        BloomPage::Browse.id()
+                    } else {
+                        prev_page_id
+                    };
+                    self.non_adb_dialog_device = Some(dev.clone());
+                    self.non_adb_dialog_open = true;
+                }
+            }
+        }
+
         let active_connected_idx = self
             .page_id
             .checked_sub(CONNECTED_DEVICE_PAGE_BASE)
-            .filter(|&idx| idx < connected_devices.len());
+            .filter(|&idx| idx < connected_devices.len() && connected_devices[idx].is_adb_ready());
 
         let current_page = BloomPage::from_id(self.page_id);
         let page_title: String = if let Some(idx) = active_connected_idx {
@@ -554,6 +627,7 @@ impl eframe::App for BloomApp {
                                 BloomPage::Decrypt => self.render_decrypt_page(ui),
                                 BloomPage::Settings => self.render_settings_page(ui),
                                 BloomPage::About => self.render_about_page(ui),
+                                BloomPage::PairDevice => self.render_pair_device_page(ui),
                             }
                             ui.add_space(28.0);
                         }
@@ -640,6 +714,30 @@ impl eframe::App for BloomApp {
             }
         }
 
+        // USB debugging requirement modal dialog
+        let non_adb_body = self
+            .non_adb_dialog_device
+            .as_ref()
+            .map(|dev| match dev.connection_mode {
+                DeviceConnectionMode::AdbUnauthorized => format!(
+                    "{} is waiting for USB debugging authorization.\n\nTap Allow on your phone's prompt, or turn on USB debugging in Developer options.",
+                    dev.display_title()
+                ),
+                _ => format!(
+                    "{} is connected using standard USB instead of USB debugging mode.\n\nTurn on USB debugging in Developer options on your phone to continue.",
+                    dev.display_title()
+                ),
+            })
+            .unwrap_or_default();
+        let _ = TwoUiDialog::new("bloom_non_adb_dialog", "USB debugging required")
+            .body(&non_adb_body)
+            .action(DialogAction::cancel("Close"))
+            .action(DialogAction::primary("OK"))
+            .show(ui.ctx(), &mut self.non_adb_dialog_open, |_| {});
+        if !self.non_adb_dialog_open {
+            self.non_adb_dialog_device = None;
+        }
+
         // Open source licenses bottom sheet
         self.render_licenses_bottom_sheet(ui.ctx(), &theme);
 
@@ -665,6 +763,19 @@ impl eframe::App for BloomApp {
                         self.gl_available && self.config.backdrop_blur,
                     );
                     self.toast.show_message(ui.ctx(), "Restored", 1.8);
+                }
+                SnackAction::ShowConnectedDevice(target_key) => {
+                    if let Some((idx, dev)) = connected_devices.iter().enumerate().find(|(_, d)| {
+                        d.stable_identity_key() == target_key || d.device_id == target_key
+                    }) {
+                        if dev.is_adb_ready() {
+                            self.page_id = CONNECTED_DEVICE_PAGE_BASE + idx;
+                        } else {
+                            self.non_adb_dialog_device = Some(dev.clone());
+                            self.non_adb_dialog_open = true;
+                        }
+                        ui.ctx().request_repaint();
+                    }
                 }
             }
         }

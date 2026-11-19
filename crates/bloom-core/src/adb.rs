@@ -1,16 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-const ADB_SERVER_ADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 5037);
+const ADB_PORT: u16 = 5037;
 const ADB_CONNECT_TIMEOUT: Duration = Duration::from_millis(350);
 const ADB_IO_TIMEOUT: Duration = Duration::from_secs(3);
+const ADB_PAIR_TIMEOUT: Duration = Duration::from_secs(15);
 const ADB_START_COOLDOWN: Duration = Duration::from_secs(15);
 const MAX_SHELL_OUTPUT_BYTES: usize = 512 * 1024;
 
@@ -24,8 +26,9 @@ const TELEMETRY_SHELL_CMD: &str = concat!(
 );
 
 static LAST_ADB_START_ATTEMPT: Mutex<Option<Instant>> = Mutex::new(None);
+static QR_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// Transport medium used by an attached ADB Samsung device.
+/// Transport medium used by an attached Samsung device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AdbTransport {
     #[default]
@@ -40,6 +43,15 @@ impl AdbTransport {
             Self::Wifi => "Wi-Fi",
         }
     }
+}
+
+/// Detection & debugging readiness state for a connected Samsung device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DeviceConnectionMode {
+    #[default]
+    AdbReady,
+    AdbUnauthorized,
+    UsbStandard,
 }
 
 /// Android `BatteryManager.BATTERY_STATUS_*` reported by `dumpsys battery`.
@@ -75,10 +87,27 @@ impl BatteryStatus {
     }
 }
 
-/// Live Samsung phone/tablet detected exclusively via ADB (`host:devices-l` + shell telemetry).
+/// Parsed line entry from `host:devices-l`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdbDeviceListEntry {
+    pub serial: String,
+    pub state: String,
+    pub model_hint: Option<String>,
+}
+
+/// Discovered wireless ADB mDNS service reported by `host:mdns:services`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdbMdnsService {
+    pub instance: String,
+    pub service_type: String,
+    pub address: String,
+}
+
+/// Live Samsung phone/tablet detected over ADB (`Usb` / `Wifi`) or fallback Windows USB (MTP/WPD).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectedSamsungDevice {
     pub device_id: String,
+    pub connection_mode: DeviceConnectionMode,
     pub transport: AdbTransport,
     pub friendly_name: String,
     pub manufacturer: String,
@@ -114,6 +143,11 @@ pub struct ConnectedSamsungDevice {
 }
 
 impl ConnectedSamsungDevice {
+    /// Returns `true` when the device is authorized over ADB and exposes full telemetry.
+    pub fn is_adb_ready(&self) -> bool {
+        self.connection_mode == DeviceConnectionMode::AdbReady
+    }
+
     /// Returns the user-visible device name (falling back to the `SM-...` model string).
     pub fn display_title(&self) -> &str {
         if self.friendly_name.trim().is_empty() {
@@ -169,7 +203,6 @@ impl ConnectedSamsungDevice {
         match self.battery_status {
             BatteryStatus::Charging => true,
             BatteryStatus::Discharging | BatteryStatus::NotCharging => false,
-            // Samsung Adaptive Protection can report status Full at 80–99% while USB power flows.
             BatteryStatus::Full => self.battery_powered,
             BatteryStatus::Unknown => {
                 self.battery_powered || self.transport == AdbTransport::Usb
@@ -185,6 +218,14 @@ impl ConnectedSamsungDevice {
             .or((self.transport == AdbTransport::Usb).then_some(self.device_id.as_str()))
             .map(str::trim)
             .filter(|s| !s.is_empty())
+    }
+
+    /// Canonical key identifying the same physical phone across WPD, USB ADB, and Wi-Fi ADB.
+    pub fn stable_identity_key(&self) -> String {
+        self.effective_serial()
+            .map(str::to_ascii_uppercase)
+            .or_else(|| extract_serial_from_mdns_instance(&self.device_id))
+            .unwrap_or_else(|| self.device_id.trim().to_ascii_uppercase())
     }
 }
 
@@ -211,6 +252,18 @@ pub fn infer_transport_from_serial(serial: &str) -> AdbTransport {
     } else {
         AdbTransport::Usb
     }
+}
+
+/// Extracts the middle hardware serial token from `adb-<SERIAL>-<suffix>._adb-tls-*._tcp` when present.
+fn extract_serial_from_mdns_instance(serial_or_instance: &str) -> Option<String> {
+    let trimmed = serial_or_instance.trim();
+    let rest = trimmed
+        .get(..4)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("adb-"))
+        .map(|_| &trimmed[4..])?;
+    let head = rest.split('.').next().unwrap_or(rest);
+    let mid = head.split('-').next()?.trim();
+    (!mid.is_empty()).then(|| mid.to_ascii_uppercase())
 }
 
 /// Parses Samsung's `ro.build.version.oneui` integer (e.g. `90000` -> `"9.0"`, `80500` -> `"8.5"`).
@@ -252,7 +305,10 @@ pub fn parse_sep_as_one_ui(raw: &str) -> Option<String> {
 /// (e.g. model `SM-S921B`, product code `SM-S921BZKCXID` -> `Some("ZK")`).
 pub fn extract_color_code_from_product_code(model: &str, product_code: &str) -> Option<String> {
     let sku = product_code.trim().to_ascii_uppercase();
-    let sku_norm = sku.strip_prefix("SM5").map(|rest| format!("SM-{rest}")).unwrap_or(sku);
+    let sku_norm = sku
+        .strip_prefix("SM5")
+        .map(|rest| format!("SM-{rest}"))
+        .unwrap_or(sku);
     let clean_model = model
         .trim()
         .split('/')
@@ -284,8 +340,8 @@ pub fn extract_color_code_from_product_code(model: &str, product_code: &str) -> 
     }
 }
 
-/// Parses `host:devices-l` response lines into `(serial, state)` pairs.
-pub fn parse_adb_devices_output(raw: &str) -> Vec<(String, String)> {
+/// Parses `host:devices-l` response lines into structured entries including `model:` hints.
+pub fn parse_adb_devices_entries(raw: &str) -> Vec<AdbDeviceListEntry> {
     raw.lines()
         .filter_map(|line| {
             let trimmed = line.trim();
@@ -296,12 +352,87 @@ pub fn parse_adb_devices_output(raw: &str) -> Vec<(String, String)> {
             let serial = parts.next()?.trim().to_owned();
             let state = parts.next()?.trim().to_owned();
             if serial.is_empty() || state.is_empty() {
-                None
-            } else {
-                Some((serial, state))
+                return None;
             }
+            let model_hint = parts.find_map(|tok| {
+                let raw_mdl = tok.strip_prefix("model:")?.trim();
+                if raw_mdl.is_empty() {
+                    return None;
+                }
+                let normalized = raw_mdl.replace('_', "-").to_ascii_uppercase();
+                Some(normalized)
+            });
+            Some(AdbDeviceListEntry {
+                serial,
+                state,
+                model_hint,
+            })
         })
         .collect()
+}
+
+/// Parses `host:devices-l` response lines into `(serial, state)` pairs.
+pub fn parse_adb_devices_output(raw: &str) -> Vec<(String, String)> {
+    parse_adb_devices_entries(raw)
+        .into_iter()
+        .map(|e| (e.serial, e.state))
+        .collect()
+}
+
+/// Parses `host:mdns:services` response lines (`instance\tservice_type\tip:port`).
+pub fn parse_mdns_services_output(raw: &str) -> Vec<AdbMdnsService> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("List of discovered") {
+                return None;
+            }
+            let mut cols = trimmed.split('\t').map(str::trim);
+            let instance = cols.next().filter(|s| !s.is_empty())?;
+            let service_type = cols.next().filter(|s| !s.is_empty())?;
+            let address = cols.next().filter(|s| !s.is_empty())?;
+            Some(AdbMdnsService {
+                instance: instance.to_owned(),
+                service_type: service_type.to_owned(),
+                address: address.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Generates a fresh `(service_name, password, qr_payload)` tuple for Android's
+/// `Pair device with QR code` (`WIFI:T:ADB;S:<service>;P:<password>;;`).
+pub fn generate_adb_qr_session() -> (String, String, String) {
+    const ALNUM: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+
+    fn next_u64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn gen_token(state: &mut u64, len: usize) -> String {
+        let mut out = String::with_capacity(len);
+        for _ in 0..len {
+            let idx = (next_u64(state) as usize) % ALNUM.len();
+            out.push(ALNUM[idx] as char);
+        }
+        out
+    }
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x517C_C1B7_2722_0A95);
+    let nonce = QR_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut seed = nanos ^ nonce.rotate_left(17);
+
+    let service_name = format!("bloom-{}", gen_token(&mut seed, 8));
+    let password = gen_token(&mut seed, 10);
+    let payload = format!("WIFI:T:ADB;S:{service_name};P:{password};;");
+    (service_name, password, payload)
 }
 
 fn first_non_empty_prop<'a>(props: &'a HashMap<String, String>, keys: &[&str]) -> Option<String> {
@@ -586,6 +717,7 @@ pub fn parse_adb_telemetry_output(
 
     Some(ConnectedSamsungDevice {
         device_id: device_id.to_owned(),
+        connection_mode: DeviceConnectionMode::AdbReady,
         transport,
         friendly_name,
         manufacturer,
@@ -695,16 +827,16 @@ fn find_adb_binary() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-fn connect_adb_socket() -> Option<TcpStream> {
-    let addr = SocketAddr::from(ADB_SERVER_ADDR);
+fn connect_adb_socket(read_timeout: Duration) -> Option<TcpStream> {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, ADB_PORT));
     let stream = TcpStream::connect_timeout(&addr, ADB_CONNECT_TIMEOUT).ok()?;
-    let _ = stream.set_read_timeout(Some(ADB_IO_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(read_timeout));
     let _ = stream.set_write_timeout(Some(ADB_IO_TIMEOUT));
     Some(stream)
 }
 
-fn ensure_adb_stream() -> Option<TcpStream> {
-    if let Some(stream) = connect_adb_socket() {
+fn ensure_adb_stream(read_timeout: Duration) -> Option<TcpStream> {
+    if let Some(stream) = connect_adb_socket(read_timeout) {
         return Some(stream);
     }
 
@@ -739,7 +871,7 @@ fn ensure_adb_stream() -> Option<TcpStream> {
     }
 
     let _ = cmd.status();
-    connect_adb_socket()
+    connect_adb_socket(read_timeout)
 }
 
 fn send_adb_packet(stream: &mut TcpStream, cmd: &str) -> std::io::Result<()> {
@@ -751,14 +883,18 @@ fn send_adb_packet(stream: &mut TcpStream, cmd: &str) -> std::io::Result<()> {
         return Ok(());
     }
     if &status == b"FAIL" {
-        let _ = read_length_prefixed_payload(stream);
+        let msg = read_length_prefixed_payload(stream).unwrap_or_default();
+        let clean = if msg.trim().is_empty() {
+            "ADB server rejected command".to_owned()
+        } else {
+            msg.trim().to_owned()
+        };
+        return Err(std::io::Error::other(clean));
     }
     Err(std::io::Error::other("ADB server rejected command"))
 }
 
-fn read_length_prefixed_payload(stream: &mut TcpStream) -> std::io::Result<String> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
+fn read_exact_hex_len_payload(stream: &mut TcpStream, len_buf: [u8; 4]) -> std::io::Result<String> {
     let len_str = std::str::from_utf8(&len_buf)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid ADB hex len"))?;
     let len = usize::from_str_radix(len_str, 16)
@@ -769,8 +905,14 @@ fn read_length_prefixed_payload(stream: &mut TcpStream) -> std::io::Result<Strin
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-fn query_adb_devices_l() -> Vec<(String, String)> {
-    let Some(mut stream) = ensure_adb_stream() else {
+fn read_length_prefixed_payload(stream: &mut TcpStream) -> std::io::Result<String> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    read_exact_hex_len_payload(stream, len_buf)
+}
+
+fn query_adb_devices_entries() -> Vec<AdbDeviceListEntry> {
+    let Some(mut stream) = ensure_adb_stream(ADB_IO_TIMEOUT) else {
         return Vec::new();
     };
     if send_adb_packet(&mut stream, "host:devices-l").is_err() {
@@ -779,11 +921,11 @@ fn query_adb_devices_l() -> Vec<(String, String)> {
     let Ok(payload) = read_length_prefixed_payload(&mut stream) else {
         return Vec::new();
     };
-    parse_adb_devices_output(&payload)
+    parse_adb_devices_entries(&payload)
 }
 
 fn query_adb_shell(serial: &str, shell_cmd: &str) -> Option<String> {
-    let mut stream = connect_adb_socket()?;
+    let mut stream = connect_adb_socket(ADB_IO_TIMEOUT)?;
     send_adb_packet(&mut stream, &format!("host:transport:{serial}")).ok()?;
     send_adb_packet(&mut stream, &format!("shell:{shell_cmd}")).ok()?;
 
@@ -802,28 +944,367 @@ fn query_adb_shell(serial: &str, shell_cmd: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// Scans authorized ADB Samsung devices (USB or Wi-Fi) across Windows, Linux, and macOS.
-pub fn scan_connected_samsung_devices() -> Vec<ConnectedSamsungDevice> {
-    let entries = query_adb_devices_l();
-    let mut devices = Vec::new();
-    for (serial, state) in entries {
-        if state != "device" {
-            continue;
+/// Discovers local wireless ADB mDNS services (`_adb-tls-pairing._tcp`, `_adb-tls-connect._tcp`).
+pub fn list_adb_mdns_services() -> Vec<AdbMdnsService> {
+    let Some(mut stream) = ensure_adb_stream(ADB_IO_TIMEOUT) else {
+        return Vec::new();
+    };
+    if send_adb_packet(&mut stream, "host:mdns:services").is_err() {
+        return Vec::new();
+    }
+    let Ok(payload) = read_length_prefixed_payload(&mut stream) else {
+        return Vec::new();
+    };
+    parse_mdns_services_output(&payload)
+}
+
+/// Pairs with an Android device over wireless ADB using its `ip:port` and QR/OTP pairing code.
+pub fn adb_pair_wireless(address: &str, code: &str) -> std::result::Result<String, String> {
+    let addr = address.trim();
+    let pwd = code.trim();
+    if addr.is_empty() || !addr.contains(':') {
+        return Err("Enter IP:port".to_owned());
+    }
+    if pwd.is_empty() {
+        return Err("Enter pairing code".to_owned());
+    }
+
+    let mut stream = ensure_adb_stream(ADB_PAIR_TIMEOUT)
+        .ok_or_else(|| "ADB server is not running".to_owned())?;
+    send_adb_packet(&mut stream, &format!("host:pair:{pwd}:{addr}"))
+        .map_err(|e| e.to_string())?;
+
+    let mut next = [0u8; 4];
+    stream.read_exact(&mut next).map_err(|e| e.to_string())?;
+    match &next {
+        b"OKAY" => {
+            let msg = read_length_prefixed_payload(&mut stream).map_err(|e| e.to_string())?;
+            let clean = msg.trim().to_owned();
+            if clean.to_ascii_lowercase().starts_with("failed") {
+                Err(clean)
+            } else {
+                Ok(clean)
+            }
         }
-        let transport = infer_transport_from_serial(&serial);
-        let Some(raw) = query_adb_shell(&serial, TELEMETRY_SHELL_CMD) else {
-            continue;
-        };
-        if let Some(dev) = parse_adb_telemetry_output(&serial, transport, &raw) {
-            devices.push(dev);
+        b"FAIL" => {
+            let msg = read_length_prefixed_payload(&mut stream).map_err(|e| e.to_string())?;
+            Err(msg.trim().to_owned())
+        }
+        _ => {
+            let msg = read_exact_hex_len_payload(&mut stream, next).map_err(|e| e.to_string())?;
+            let clean = msg.trim().to_owned();
+            if clean.to_ascii_lowercase().contains("successfully paired") {
+                Ok(clean)
+            } else {
+                Err(clean)
+            }
         }
     }
-    devices
+}
+
+/// Connects to an already-paired wireless ADB endpoint (`ip:port`).
+pub fn adb_connect_wireless(address: &str) -> std::result::Result<String, String> {
+    let addr = address.trim();
+    if addr.is_empty() || !addr.contains(':') {
+        return Err("Enter IP:port".to_owned());
+    }
+
+    let mut stream = ensure_adb_stream(ADB_PAIR_TIMEOUT)
+        .ok_or_else(|| "ADB server is not running".to_owned())?;
+    send_adb_packet(&mut stream, &format!("host:connect:{addr}"))
+        .map_err(|e| e.to_string())?;
+    let msg = read_length_prefixed_payload(&mut stream).map_err(|e| e.to_string())?;
+    let clean = msg.trim().to_owned();
+    if clean.to_ascii_lowercase().contains("connected to") {
+        Ok(clean)
+    } else {
+        Err(clean)
+    }
+}
+
+fn extract_guid_from_pair_message(msg: &str) -> Option<&str> {
+    let start = msg.find("[guid=")? + "[guid=".len();
+    let rest = &msg[start..];
+    let end = rest.find(']')?;
+    let guid = rest[..end].trim();
+    (!guid.is_empty()).then_some(guid)
+}
+
+/// Pairs with an Android wireless debugging endpoint and ensures its `_adb-tls-connect._tcp`
+/// service is connected.
+pub fn adb_pair_and_connect_wireless(address: &str, code: &str) -> std::result::Result<String, String> {
+    let pair_msg = adb_pair_wireless(address, code)?;
+    let guid = extract_guid_from_pair_message(&pair_msg);
+    let host_ip = address.trim().rsplit_once(':').map(|(h, _)| h);
+
+    std::thread::sleep(Duration::from_millis(650));
+
+    let current_devices = query_adb_devices_entries();
+    let already_attached = current_devices.iter().any(|entry| {
+        entry.state == "device"
+            && guid.is_some_and(|g| entry.serial.contains(g))
+    });
+    if already_attached {
+        return Ok(pair_msg);
+    }
+
+    let services = list_adb_mdns_services();
+    let target = services
+        .iter()
+        .find(|svc| {
+            svc.service_type == "_adb-tls-connect._tcp"
+                && guid.is_some_and(|g| svc.instance.eq_ignore_ascii_case(g))
+        })
+        .or_else(|| {
+            services.iter().find(|svc| {
+                svc.service_type == "_adb-tls-connect._tcp"
+                    && host_ip
+                        .is_some_and(|ip| svc.address.starts_with(&format!("{ip}:")))
+            })
+        });
+
+    if let Some(svc) = target {
+        let _ = adb_connect_wireless(&svc.address);
+    }
+
+    Ok(pair_msg)
+}
+
+fn serial_matches_entry(serial: &str, candidates: &HashSet<String>) -> bool {
+    let upper = serial.trim().to_ascii_uppercase();
+    if candidates.contains(&upper) {
+        return true;
+    }
+    extract_serial_from_mdns_instance(&upper).is_some_and(|mid| candidates.contains(&mid))
+}
+
+fn device_serial_candidates(dev: &ConnectedSamsungDevice) -> Vec<String> {
+    let mut keys = Vec::with_capacity(4);
+    if let Some(ref s) = dev.serial {
+        let u = s.trim().to_ascii_uppercase();
+        if !u.is_empty() {
+            keys.push(u);
+        }
+    }
+    if let Some(ref s) = dev.usb_serial {
+        let u = s.trim().to_ascii_uppercase();
+        if !u.is_empty() && !keys.contains(&u) {
+            keys.push(u);
+        }
+    }
+    if dev.transport == AdbTransport::Usb && dev.connection_mode != DeviceConnectionMode::UsbStandard
+    {
+        let u = dev.device_id.trim().to_ascii_uppercase();
+        if !u.is_empty() && !keys.contains(&u) {
+            keys.push(u);
+        }
+    }
+    if let Some(mid) = extract_serial_from_mdns_instance(&dev.device_id) {
+        if !keys.contains(&mid) {
+            keys.push(mid);
+        }
+    }
+    keys
+}
+
+/// Merges ready ADB Samsung devices, unauthorized/authorizing ADB entries, and standard Windows USB
+/// (WPD) devices into a single deduplicated list (preferring USB ADB > Wi-Fi ADB > Unauth ADB > WPD).
+pub fn merge_and_deduplicate_devices(
+    mut adb_ready: Vec<ConnectedSamsungDevice>,
+    adb_unauth: Vec<AdbDeviceListEntry>,
+    wpd_devices: Vec<ConnectedSamsungDevice>,
+) -> Vec<ConnectedSamsungDevice> {
+    adb_ready.sort_by_key(|d| match d.transport {
+        AdbTransport::Usb => 0u8,
+        AdbTransport::Wifi => 1u8,
+    });
+
+    let mut out: Vec<ConnectedSamsungDevice> = Vec::with_capacity(adb_ready.len() + wpd_devices.len());
+    let mut seen_serials: HashSet<String> = HashSet::new();
+
+    for dev in adb_ready {
+        let cands = device_serial_candidates(&dev);
+        if cands.iter().any(|k| seen_serials.contains(k)) {
+            continue;
+        }
+        seen_serials.extend(cands);
+        out.push(dev);
+    }
+
+    let mut used_unauth_serials: HashSet<String> = HashSet::new();
+
+    for mut wpd in wpd_devices {
+        let cands = device_serial_candidates(&wpd);
+        if cands.iter().any(|k| seen_serials.contains(k)) {
+            continue;
+        }
+        if cands.is_empty()
+            && out
+                .iter()
+                .any(|d| d.is_adb_ready() && d.model.eq_ignore_ascii_case(&wpd.model))
+        {
+            continue;
+        }
+
+        let cand_set: HashSet<String> = cands.iter().cloned().collect();
+        let matching_unauth = adb_unauth.iter().find(|entry| {
+            !used_unauth_serials.contains(&entry.serial)
+                && serial_matches_entry(&entry.serial, &cand_set)
+        });
+
+        if let Some(entry) = matching_unauth {
+            used_unauth_serials.insert(entry.serial.clone());
+            wpd.connection_mode = DeviceConnectionMode::AdbUnauthorized;
+        } else {
+            wpd.connection_mode = DeviceConnectionMode::UsbStandard;
+        }
+
+        seen_serials.extend(cands);
+        out.push(wpd);
+    }
+
+    for entry in adb_unauth {
+        if used_unauth_serials.contains(&entry.serial) {
+            continue;
+        }
+        if serial_matches_entry(&entry.serial, &seen_serials) {
+            continue;
+        }
+        if let Some(ref hint) = entry.model_hint {
+            if !is_samsung_device("", hint, "") {
+                continue;
+            }
+        }
+        let transport = infer_transport_from_serial(&entry.serial);
+        let fallback_model = entry
+            .model_hint
+            .clone()
+            .unwrap_or_else(|| "Samsung Device".to_owned());
+        let extracted_serial = if transport == AdbTransport::Usb {
+            Some(entry.serial.to_ascii_uppercase())
+        } else {
+            extract_serial_from_mdns_instance(&entry.serial)
+        };
+        let friendly_name = entry
+            .model_hint
+            .clone()
+            .unwrap_or_else(|| entry.serial.clone());
+
+        if let Some(ref sn) = extracted_serial {
+            seen_serials.insert(sn.clone());
+        }
+        out.push(ConnectedSamsungDevice {
+            device_id: entry.serial,
+            connection_mode: DeviceConnectionMode::AdbUnauthorized,
+            transport,
+            friendly_name,
+            manufacturer: "samsung".to_owned(),
+            model: fallback_model,
+            codename: None,
+            product_code: None,
+            color_code: None,
+            serial: extracted_serial.clone(),
+            usb_serial: extracted_serial,
+            csc: None,
+            country_code: None,
+            country_iso: None,
+            multi_csc: None,
+            one_ui_version: None,
+            android_version: None,
+            sdk_version: None,
+            security_patch: None,
+            firmware_build: None,
+            csc_build: None,
+            cp_build: None,
+            bootloader_build: None,
+            build_display_id: None,
+            changelist: None,
+            knox_warranty_bit: None,
+            bootloader_locked: None,
+            soc_model: None,
+            battery_percent: None,
+            battery_status: BatteryStatus::Unknown,
+            battery_powered: false,
+            battery_temp_tenths_c: None,
+            battery_voltage_mv: None,
+            battery_health_percent: None,
+        });
+    }
+
+    out
+}
+
+/// Scans connected Samsung devices across ADB (USB + Wi-Fi) and Windows WPD standard USB,
+/// returning a deduplicated unified list with connection readiness metadata.
+pub fn scan_connected_samsung_devices() -> Vec<ConnectedSamsungDevice> {
+    let entries = query_adb_devices_entries();
+    let mut adb_ready = Vec::new();
+    let mut adb_unauth = Vec::new();
+
+    for entry in entries {
+        if entry.state == "device" {
+            let transport = infer_transport_from_serial(&entry.serial);
+            if let Some(raw) = query_adb_shell(&entry.serial, TELEMETRY_SHELL_CMD) {
+                if let Some(dev) = parse_adb_telemetry_output(&entry.serial, transport, &raw) {
+                    adb_ready.push(dev);
+                }
+            }
+        } else if entry.state == "unauthorized" || entry.state == "authorizing" {
+            adb_unauth.push(entry);
+        }
+    }
+
+    let wpd_devices = crate::wpd::scan_wpd_samsung_devices();
+    merge_and_deduplicate_devices(adb_ready, adb_unauth, wpd_devices)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stub_device(
+        id: &str,
+        mode: DeviceConnectionMode,
+        transport: AdbTransport,
+        serial: Option<&str>,
+    ) -> ConnectedSamsungDevice {
+        ConnectedSamsungDevice {
+            device_id: id.into(),
+            connection_mode: mode,
+            transport,
+            friendly_name: "A35 5G milik Fauzan".into(),
+            manufacturer: "samsung".into(),
+            model: "SM-S921B".into(),
+            codename: None,
+            product_code: None,
+            color_code: None,
+            serial: serial.map(str::to_owned),
+            usb_serial: serial.map(str::to_owned),
+            csc: (mode == DeviceConnectionMode::AdbReady).then(|| "XID".into()),
+            country_code: None,
+            country_iso: None,
+            multi_csc: None,
+            one_ui_version: None,
+            android_version: None,
+            sdk_version: None,
+            security_patch: None,
+            firmware_build: Some("S921BXXUIEZJD".into()),
+            csc_build: None,
+            cp_build: None,
+            bootloader_build: None,
+            build_display_id: None,
+            changelist: None,
+            knox_warranty_bit: None,
+            bootloader_locked: None,
+            soc_model: None,
+            battery_percent: Some(82),
+            battery_status: BatteryStatus::Charging,
+            battery_powered: true,
+            battery_temp_tenths_c: None,
+            battery_voltage_mv: None,
+            battery_health_percent: None,
+        }
+    }
 
     #[test]
     fn parses_one_ui_and_sep_versions() {
@@ -853,6 +1334,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_mdns_services_and_qr_sessions() {
+        let mdns_raw = concat!(
+            "adb-RRGYC063QZR-kjkCXG\t_adb-tls-pairing._tcp\t192.168.1.4:45699\n",
+            "adb-RRGYC063QZR-kjkCXG\t_adb-tls-connect._tcp\t192.168.1.4:46553\n"
+        );
+        let list = parse_mdns_services_output(mdns_raw);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].instance, "adb-RRGYC063QZR-kjkCXG");
+        assert_eq!(list[0].service_type, "_adb-tls-pairing._tcp");
+        assert_eq!(list[0].address, "192.168.1.4:45699");
+        assert_eq!(list[1].service_type, "_adb-tls-connect._tcp");
+        assert_eq!(list[1].address, "192.168.1.4:46553");
+
+        let (svc1, pw1, qr1) = generate_adb_qr_session();
+        let (svc2, _, _) = generate_adb_qr_session();
+        assert!(svc1.starts_with("bloom-"));
+        assert_eq!(pw1.len(), 10);
+        assert_eq!(qr1, format!("WIFI:T:ADB;S:{svc1};P:{pw1};;"));
+        assert_ne!(svc1, svc2);
+    }
+
+    #[test]
     fn parses_adb_devices_and_real_samsung_telemetry() {
         let list = "RRGYC063QZR            device product:e1sxxx model:SM_S921B device:e1s transport_id:1\n192.168.1.50:39421    offline product:e1s\n";
         assert_eq!(
@@ -862,8 +1365,15 @@ mod tests {
                 ("192.168.1.50:39421".to_owned(), "offline".to_owned())
             ]
         );
+        let entries = parse_adb_devices_entries(list);
+        assert_eq!(entries[0].model_hint.as_deref(), Some("SM-S921B"));
+        assert_eq!(entries[1].model_hint, None);
+
         assert_eq!(infer_transport_from_serial("RRGYC063QZR"), AdbTransport::Usb);
-        assert_eq!(infer_transport_from_serial("192.168.1.50:39421"), AdbTransport::Wifi);
+        assert_eq!(
+            infer_transport_from_serial("adb-RRGYC063QZR-kjkCXG._adb-tls-connect._tcp"),
+            AdbTransport::Wifi
+        );
 
         let raw = r#"
 BLOOM_NAME=A35 5G milik Fauzan
@@ -909,6 +1419,7 @@ mSavedBatteryBsoh: 92
 
         let dev = parse_adb_telemetry_output("RRGYC063QZR", AdbTransport::Usb, raw)
             .expect("valid samsung telemetry");
+        assert!(dev.is_adb_ready());
         assert_eq!(dev.friendly_name, "A35 5G milik Fauzan");
         assert_eq!(dev.model, "SM-S921B");
         assert_eq!(dev.codename.as_deref(), Some("e1s"));
@@ -930,43 +1441,60 @@ mSavedBatteryBsoh: 92
     }
 
     #[test]
-    fn computes_battery_gradient_sweep_for_usb_and_wifi() {
-        let mut dev = ConnectedSamsungDevice {
-            device_id: "RRGYC063QZR".into(),
-            transport: AdbTransport::Usb,
-            friendly_name: "S24".into(),
-            manufacturer: "samsung".into(),
-            model: "SM-S921B".into(),
-            codename: None,
-            product_code: None,
-            color_code: None,
-            serial: None,
-            usb_serial: None,
-            csc: Some("XID".into()),
-            country_code: None,
-            country_iso: None,
-            multi_csc: None,
-            one_ui_version: None,
-            android_version: None,
-            sdk_version: None,
-            security_patch: None,
-            firmware_build: None,
-            csc_build: None,
-            cp_build: None,
-            bootloader_build: None,
-            build_display_id: None,
-            changelist: None,
-            knox_warranty_bit: None,
-            bootloader_locked: None,
-            soc_model: None,
-            battery_percent: Some(82),
-            battery_status: BatteryStatus::Charging,
-            battery_powered: true,
-            battery_temp_tenths_c: None,
-            battery_voltage_mv: None,
-            battery_health_percent: None,
-        };
+    fn merges_and_deduplicates_wpd_usb_and_wifi_devices() {
+        let usb_adb = stub_device(
+            "RRGYC063QZR",
+            DeviceConnectionMode::AdbReady,
+            AdbTransport::Usb,
+            Some("RRGYC063QZR"),
+        );
+        let wifi_adb = stub_device(
+            "adb-RRGYC063QZR-kjkCXG._adb-tls-connect._tcp",
+            DeviceConnectionMode::AdbReady,
+            AdbTransport::Wifi,
+            Some("RRGYC063QZR"),
+        );
+        let wpd_same = stub_device(
+            r"\\?\usb#vid_04e8#...",
+            DeviceConnectionMode::UsbStandard,
+            AdbTransport::Usb,
+            Some("RRGYC063QZR"),
+        );
 
+        let merged = merge_and_deduplicate_devices(
+            vec![wifi_adb, usb_adb],
+            Vec::new(),
+            vec![wpd_same.clone()],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].transport, AdbTransport::Usb);
+        assert_eq!(merged[0].connection_mode, DeviceConnectionMode::AdbReady);
+
+        // Unauthorized ADB + WPD combines into single AdbUnauthorized keeping WPD friendly name
+        let unauth_entry = AdbDeviceListEntry {
+            serial: "RRGYC063QZR".into(),
+            state: "unauthorized".into(),
+            model_hint: Some("SM-S921B".into()),
+        };
+        let combined = merge_and_deduplicate_devices(Vec::new(), vec![unauth_entry], vec![wpd_same.clone()]);
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].connection_mode, DeviceConnectionMode::AdbUnauthorized);
+        assert_eq!(combined[0].friendly_name, "A35 5G milik Fauzan");
+
+        // WPD alone stays UsbStandard
+        let std_only = merge_and_deduplicate_devices(Vec::new(), Vec::new(), vec![wpd_same]);
+        assert_eq!(std_only.len(), 1);
+        assert_eq!(std_only[0].connection_mode, DeviceConnectionMode::UsbStandard);
+    }
+
+    #[test]
+    fn computes_battery_gradient_sweep_for_usb_and_wifi() {
+        let mut dev = stub_device(
+            "RRGYC063QZR",
+            DeviceConnectionMode::AdbReady,
+            AdbTransport::Usb,
+            Some("RRGYC063QZR"),
+        );
         assert!(dev.should_animate_battery_gradient());
 
         dev.battery_percent = Some(100);

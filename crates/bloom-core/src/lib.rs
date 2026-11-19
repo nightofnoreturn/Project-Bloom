@@ -7,11 +7,15 @@ pub mod error;
 pub mod fus;
 pub mod history;
 pub mod renders;
+pub mod wpd;
 pub mod xml;
 
 pub use adb::{
-    extract_color_code_from_product_code, parse_one_ui_prop, scan_connected_samsung_devices,
-    AdbTransport, BatteryStatus, ConnectedSamsungDevice,
+    adb_connect_wireless, adb_pair_and_connect_wireless, adb_pair_wireless,
+    extract_color_code_from_product_code, generate_adb_qr_session, list_adb_mdns_services,
+    merge_and_deduplicate_devices, parse_mdns_services_output, parse_one_ui_prop,
+    scan_connected_samsung_devices, AdbDeviceListEntry, AdbMdnsService, AdbTransport,
+    BatteryStatus, ConnectedSamsungDevice, DeviceConnectionMode,
 };
 pub use data::{
     country_name, BinaryFileInfo, CscDb, CscItem, ImeiDb, LatestVersionInfo, SmartBinaryInfo,
