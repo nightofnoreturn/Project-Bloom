@@ -321,6 +321,38 @@ impl BloomApp {
                 Frame::NONE
                     .inner_margin(Margin::symmetric(20, 12))
                     .show(ui, |ui| {
+                        let def_region_hint = self
+                            .csc_db
+                            .find_exact(self.config.default_csc.trim())
+                            .map(|r| r.region_label());
+                        let resp = labeled_text_field(
+                            ui,
+                            "Default Region (CSC)",
+                            &mut self.config.default_csc,
+                            "None",
+                            def_region_hint.as_deref(),
+                            !is_busy,
+                        );
+                        if resp.changed() {
+                            self.config.default_csc =
+                                self.config.default_csc.trim().to_ascii_uppercase();
+                        }
+                    });
+
+                let mut ask_default_region = !self.config.dont_ask_default_csc;
+                if SwitchItem::new(&mut ask_default_region, "Ask to save default region")
+                    .top_divider(true)
+                    .enabled(!is_busy)
+                    .show(ui)
+                    .toggled
+                {
+                    self.config.dont_ask_default_csc = !ask_default_region;
+                }
+
+                paint_divider(ui, DividerInset::FullWidth);
+                Frame::NONE
+                    .inner_margin(Margin::symmetric(20, 12))
+                    .show(ui, |ui| {
                         labeled_text_field(
                             ui,
                             "IMEI (Optional)",

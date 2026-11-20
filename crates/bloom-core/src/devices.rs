@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,6 +11,97 @@ use crate::error::Result;
 /// Google Play public catalog CSV of supported Android devices.
 pub const SUPPORTED_DEVICES_CSV_URL: &str =
     "https://storage.googleapis.com/play_public/supported_devices.csv";
+
+/// Top-level Galaxy device series categories for the Browse catalog drill-down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GalaxyRootSeries {
+    A,
+    M,
+    S,
+    Z,
+    Tab,
+    Other,
+}
+
+impl GalaxyRootSeries {
+    pub const ALL: [Self; 6] = [
+        Self::A,
+        Self::M,
+        Self::S,
+        Self::Z,
+        Self::Tab,
+        Self::Other,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::A => "Galaxy A Series",
+            Self::M => "Galaxy M Series",
+            Self::S => "Galaxy S Series",
+            Self::Z => "Galaxy Z Series",
+            Self::Tab => "Galaxy Tab Series",
+            Self::Other => "Other Galaxy Series",
+        }
+    }
+}
+
+/// Second-level sub-categories inside `Galaxy Tab Series`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GalaxyTabSeries {
+    TabS,
+    TabA,
+    TabM,
+    OtherTab,
+}
+
+impl GalaxyTabSeries {
+    pub const ALL: [Self; 4] = [
+        Self::TabS,
+        Self::TabA,
+        Self::TabM,
+        Self::OtherTab,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::TabS => "Galaxy Tab S",
+            Self::TabA => "Galaxy Tab A",
+            Self::TabM => "Galaxy Tab M",
+            Self::OtherTab => "Other Galaxy Tab",
+        }
+    }
+}
+
+/// A distinct marketing device name (e.g. `Galaxy S24`) and all retail model variants sold for it
+/// (`SM-S921B`, `SM-S921U`, `SM-S921N`, `SM-S9210`, etc.).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogMarketingGroup {
+    pub marketing_name: String,
+    pub models: Vec<GalaxyDevice>,
+}
+
+/// An entry inside a Browse category: either a generation/family sub-series with multiple
+/// derivative marketing names (e.g. `Galaxy S24 Series`), or a standalone marketing name that
+/// has no sibling derivatives (e.g. `Galaxy A55 5G`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogCategoryItem {
+    SubSeries {
+        base_family: String,
+        display_title: String,
+        marketing_names: Vec<CatalogMarketingGroup>,
+        total_models: usize,
+    },
+    SingleDevice(CatalogMarketingGroup),
+}
+
+impl CatalogCategoryItem {
+    pub fn display_title(&self) -> &str {
+        match self {
+            Self::SubSeries { display_title, .. } => display_title,
+            Self::SingleDevice(group) => &group.marketing_name,
+        }
+    }
+}
 
 /// Single Samsung Galaxy device entry extracted from Google Play's `supported_devices.csv`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -24,6 +116,316 @@ impl GalaxyDevice {
     pub fn display_label(&self) -> String {
         format!("{} ({})", self.marketing_name, self.model)
     }
+}
+
+/// Strips the leading `"Galaxy"` prefix (case-insensitive) and returns the trimmed remainder.
+fn strip_galaxy_prefix(marketing_name: &str) -> &str {
+    let trimmed = marketing_name.trim();
+    if trimmed.len() >= 6
+        && trimmed
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("galaxy"))
+    {
+        trimmed[6..].trim_start()
+    } else {
+        trimmed
+    }
+}
+
+/// Checks if `rest` starts with `letter` (case-insensitive) followed by end-of-string, a digit,
+/// whitespace, or punctuation — NOT another ASCII letter (so `"Ace"`, `"Alpha"`, `"Active"`,
+/// `"Mega"`, `"Mini"`, `"Star"`, `"Spica"` do not match `'A'`, `'M'`, or `'S'`).
+fn starts_with_series_letter(rest: &str, letter: u8) -> bool {
+    let bytes = rest.as_bytes();
+    let Some(&first) = bytes.first() else {
+        return false;
+    };
+    if !first.eq_ignore_ascii_case(&letter) {
+        return false;
+    }
+    match bytes.get(1) {
+        None => true,
+        Some(&next) => !next.is_ascii_alphabetic(),
+    }
+}
+
+fn is_tab_marketing_name(rest: &str) -> bool {
+    rest.len() >= 3
+        && rest
+            .get(..3)
+            .is_some_and(|p| p.eq_ignore_ascii_case("tab"))
+}
+
+fn is_z_marketing_name(rest: &str) -> bool {
+    if starts_with_series_letter(rest, b'Z') {
+        return true;
+    }
+    if rest.len() >= 4
+        && rest
+            .get(..4)
+            .is_some_and(|p| p.eq_ignore_ascii_case("fold"))
+    {
+        return match rest.as_bytes().get(4) {
+            None => true,
+            Some(&next) => !next.is_ascii_alphabetic(),
+        };
+    }
+    false
+}
+
+/// Classifies a Samsung Galaxy marketing name into one of the 6 top-level series categories.
+pub fn classify_root_series(marketing_name: &str) -> GalaxyRootSeries {
+    let rest = strip_galaxy_prefix(marketing_name);
+    if is_tab_marketing_name(rest) {
+        GalaxyRootSeries::Tab
+    } else if starts_with_series_letter(rest, b'A') {
+        GalaxyRootSeries::A
+    } else if starts_with_series_letter(rest, b'M') {
+        GalaxyRootSeries::M
+    } else if starts_with_series_letter(rest, b'S') {
+        GalaxyRootSeries::S
+    } else if is_z_marketing_name(rest) {
+        GalaxyRootSeries::Z
+    } else {
+        GalaxyRootSeries::Other
+    }
+}
+
+/// Classifies a `Galaxy Tab` marketing name into `TabS`, `TabA`, `TabM`, or `OtherTab`.
+pub fn classify_tab_series(marketing_name: &str) -> Option<GalaxyTabSeries> {
+    let rest = strip_galaxy_prefix(marketing_name);
+    if !is_tab_marketing_name(rest) {
+        return None;
+    }
+    let after_tab = rest[3..].trim_start();
+    if starts_with_series_letter(after_tab, b'S') {
+        Some(GalaxyTabSeries::TabS)
+    } else if starts_with_series_letter(after_tab, b'A') {
+        Some(GalaxyTabSeries::TabA)
+    } else if starts_with_series_letter(after_tab, b'M') {
+        Some(GalaxyTabSeries::TabM)
+    } else {
+        Some(GalaxyTabSeries::OtherTab)
+    }
+}
+
+/// Extracts the base generation/family name used to group derivative marketing names
+/// (e.g. `"Galaxy S24 Ultra"` -> `"Galaxy S24"`, `"Galaxy Tab S9 FE 5G"` -> `"Galaxy Tab S9"`).
+pub fn extract_base_family(marketing_name: &str) -> String {
+    let rest = strip_galaxy_prefix(marketing_name);
+
+    if is_tab_marketing_name(rest) {
+        let after_tab = rest[3..].trim_start();
+        for &letter in &[b'S', b'A', b'M'] {
+            if starts_with_series_letter(after_tab, letter) {
+                let ch = (letter as char).to_ascii_uppercase();
+                let after_letter = &after_tab[1..];
+                let digits: String = after_letter
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if !digits.is_empty() {
+                    return format!("Galaxy Tab {ch}{digits}");
+                }
+                return format!("Galaxy Tab {ch}");
+            }
+        }
+        if after_tab.len() >= 6
+            && after_tab
+                .get(..6)
+                .is_some_and(|p| p.eq_ignore_ascii_case("active"))
+        {
+            return "Galaxy Tab Active".to_owned();
+        }
+        if after_tab.len() >= 3
+            && after_tab
+                .get(..3)
+                .is_some_and(|p| p.eq_ignore_ascii_case("pro"))
+        {
+            return "Galaxy Tab Pro".to_owned();
+        }
+        if starts_with_series_letter(after_tab, b'E') {
+            return "Galaxy Tab E".to_owned();
+        }
+        let num_tok: String = after_tab
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if !num_tok.is_empty() {
+            return format!("Galaxy Tab {num_tok}");
+        }
+        if after_tab.is_empty() {
+            return "Galaxy Tab".to_owned();
+        }
+        return format!("Galaxy Tab {after_tab}");
+    }
+
+    if is_z_marketing_name(rest) {
+        if rest.len() >= 4
+            && rest
+                .get(..4)
+                .is_some_and(|p| p.eq_ignore_ascii_case("fold"))
+        {
+            return "Galaxy Fold".to_owned();
+        }
+        let after_z = rest[1..].trim_start();
+        for &(prefix, canonical) in &[("fold", "Fold"), ("flip", "Flip")] {
+            if after_z.len() >= 4
+                && after_z
+                    .get(..4)
+                    .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+            {
+                let after_kind = &after_z[4..];
+                let digits: String = after_kind
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if !digits.is_empty() {
+                    return format!("Galaxy Z {canonical}{digits}");
+                }
+                let rem = after_kind.trim();
+                if rem.is_empty() || rem.eq_ignore_ascii_case("5g") {
+                    return format!("Galaxy Z {canonical}");
+                }
+                return format!("Galaxy {rest}");
+            }
+        }
+        return format!("Galaxy {rest}");
+    }
+
+    for &letter in &[b'A', b'M', b'S', b'F', b'C', b'J', b'E', b'W', b'Y'] {
+        if starts_with_series_letter(rest, letter) {
+            let ch = (letter as char).to_ascii_uppercase();
+            let digits: String = rest[1..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                return format!("Galaxy {ch}{digits}");
+            }
+            return format!("Galaxy {ch}");
+        }
+    }
+
+    for &(prefix, canonical) in &[("note", "Note"), ("watch", "Watch"), ("on", "On")] {
+        let plen = prefix.len();
+        if rest.len() >= plen
+            && rest
+                .get(..plen)
+                .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+        {
+            let after = &rest[plen..];
+            if after.is_empty() || !after.as_bytes()[0].is_ascii_alphabetic() {
+                let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty() {
+                    return format!("Galaxy {canonical}{digits}");
+                }
+                return format!("Galaxy {canonical}");
+            }
+        }
+    }
+
+    for &(prefix, canonical) in &[
+        ("xcover", "XCover"),
+        ("wide", "Wide"),
+        ("quantum", "Quantum"),
+        ("buddy", "Buddy"),
+        ("core", "Core"),
+        ("grand", "Grand"),
+        ("ace", "Ace"),
+        ("pocket", "Pocket"),
+        ("player", "Player"),
+        ("view", "View"),
+        ("win", "Win"),
+        ("young", "Young"),
+        ("mega", "Mega"),
+        ("mini", "Mini"),
+        ("star", "Star"),
+        ("trend", "Trend"),
+        ("folder", "Folder"),
+        ("feel", "Feel"),
+        ("camera", "Camera"),
+        ("tv", "TV"),
+        ("golden", "Golden"),
+        ("express", "Express"),
+        ("exhibit", "Exhibit"),
+        ("admire", "Admire"),
+        ("rugby", "Rugby"),
+        ("prevail", "Prevail"),
+        ("music", "Music"),
+        ("fame", "Fame"),
+    ] {
+        let plen = prefix.len();
+        if rest.len() >= plen
+            && rest
+                .get(..plen)
+                .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+        {
+            let after = &rest[plen..];
+            if after.is_empty() || !after.as_bytes()[0].is_ascii_alphabetic() {
+                return format!("Galaxy {canonical}");
+            }
+        }
+    }
+
+    format!("Galaxy {rest}")
+}
+
+/// Natural case-insensitive alphanumeric comparison so `"Galaxy S2"` sorts before `"Galaxy S10"`.
+pub fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let mut ia = 0;
+    let mut ib = 0;
+
+    while ia < ab.len() && ib < bb.len() {
+        if ab[ia].is_ascii_digit() && bb[ib].is_ascii_digit() {
+            let sa = ia;
+            while ia < ab.len() && ab[ia].is_ascii_digit() {
+                ia += 1;
+            }
+            let sb = ib;
+            while ib < bb.len() && bb[ib].is_ascii_digit() {
+                ib += 1;
+            }
+
+            let da = &ab[sa..ia];
+            let db = &bb[sb..ib];
+            let za = da.iter().position(|&c| c != b'0').unwrap_or(da.len());
+            let zb = db.iter().position(|&c| c != b'0').unwrap_or(db.len());
+            let na = &da[za..];
+            let nb = &db[zb..];
+
+            match na.len().cmp(&nb.len()) {
+                Ordering::Equal => match na.cmp(nb) {
+                    Ordering::Equal => match da.len().cmp(&db.len()) {
+                        Ordering::Equal => {}
+                        ord => return ord,
+                    },
+                    ord => return ord,
+                },
+                ord => return ord,
+            }
+        } else {
+            let ca = ab[ia].to_ascii_lowercase();
+            let cb = bb[ib].to_ascii_lowercase();
+            match ca.cmp(&cb) {
+                Ordering::Equal => {
+                    ia += 1;
+                    ib += 1;
+                }
+                ord => return ord,
+            }
+        }
+    }
+
+    ab.len().cmp(&bb.len())
+}
+
+fn model_code_cmp(a: &GalaxyDevice, b: &GalaxyDevice) -> Ordering {
+    let a_sm = a.model.starts_with("SM-");
+    let b_sm = b.model.starts_with("SM-");
+    b_sm.cmp(&a_sm).then_with(|| natural_cmp(&a.model, &b.model))
 }
 
 /// On-disk JSON cache storing filtered Samsung Galaxy devices (~150 KB instead of 4.8 MB raw CSV).
@@ -132,6 +534,128 @@ impl DeviceCatalog {
         prefix_hits.extend(other_hits);
         prefix_hits.truncate(limit);
         (prefix_hits, total)
+    }
+
+    /// Returns the `GalaxyTabSeries` sub-categories that contain at least 1 device in the catalog.
+    pub fn available_tab_series(&self) -> Vec<GalaxyTabSeries> {
+        let mut present = Vec::with_capacity(4);
+        for sub in GalaxyTabSeries::ALL {
+            if self
+                .entries
+                .iter()
+                .any(|e| classify_tab_series(&e.device.marketing_name) == Some(sub))
+            {
+                present.push(sub);
+            }
+        }
+        present
+    }
+
+    /// Returns all retail model variants sold for a given marketing name (case-insensitive).
+    pub fn find_marketing_group(&self, marketing_name: &str) -> Option<CatalogMarketingGroup> {
+        let target = marketing_name.trim();
+        if target.is_empty() {
+            return None;
+        }
+        let mut canonical_name: Option<String> = None;
+        let mut models: Vec<GalaxyDevice> = Vec::new();
+        for entry in &self.entries {
+            if entry.device.marketing_name.eq_ignore_ascii_case(target) {
+                if canonical_name.is_none() {
+                    canonical_name = Some(entry.device.marketing_name.clone());
+                }
+                if !models
+                    .iter()
+                    .any(|m| m.model.eq_ignore_ascii_case(&entry.device.model))
+                {
+                    models.push(entry.device.clone());
+                }
+            }
+        }
+        if models.is_empty() {
+            return None;
+        }
+        models.sort_by(model_code_cmp);
+        Some(CatalogMarketingGroup {
+            marketing_name: canonical_name.unwrap_or_else(|| target.to_owned()),
+            models,
+        })
+    }
+
+    /// Builds the sorted list of category items (`SubSeries` when a base family has > 1 distinct
+    /// marketing name derivative, or `SingleDevice` when a family only has 1 marketing name).
+    pub fn category_items(
+        &self,
+        root: GalaxyRootSeries,
+        tab_sub: Option<GalaxyTabSeries>,
+    ) -> Vec<CatalogCategoryItem> {
+        // First group matching devices by case-insensitive marketing name.
+        let mut by_marketing: BTreeMap<String, CatalogMarketingGroup> = BTreeMap::new();
+
+        for entry in &self.entries {
+            let dev = &entry.device;
+            if classify_root_series(&dev.marketing_name) != root {
+                continue;
+            }
+            if root == GalaxyRootSeries::Tab {
+                if let Some(sub) = tab_sub {
+                    if classify_tab_series(&dev.marketing_name) != Some(sub) {
+                        continue;
+                    }
+                }
+            }
+
+            let key = dev.marketing_name.trim().to_ascii_lowercase();
+            let group = by_marketing
+                .entry(key)
+                .or_insert_with(|| CatalogMarketingGroup {
+                    marketing_name: dev.marketing_name.trim().to_owned(),
+                    models: Vec::new(),
+                });
+            if !group
+                .models
+                .iter()
+                .any(|m| m.model.eq_ignore_ascii_case(&dev.model))
+            {
+                group.models.push(dev.clone());
+            }
+        }
+
+        // Next group marketing names by base family.
+        let mut by_family: BTreeMap<String, (String, Vec<CatalogMarketingGroup>)> = BTreeMap::new();
+        for (_, mut mgroup) in by_marketing {
+            mgroup.models.sort_by(model_code_cmp);
+            let family = extract_base_family(&mgroup.marketing_name);
+            let fam_key = family.to_ascii_lowercase();
+            let slot = by_family
+                .entry(fam_key)
+                .or_insert_with(|| (family, Vec::new()));
+            slot.1.push(mgroup);
+        }
+
+        let mut out: Vec<CatalogCategoryItem> = Vec::with_capacity(by_family.len());
+        for (_, (base_family, mut groups)) in by_family {
+            groups.sort_by(|a, b| natural_cmp(&a.marketing_name, &b.marketing_name));
+            if groups.len() > 1 {
+                let total_models = groups.iter().map(|g| g.models.len()).sum();
+                let display_title = if base_family.ends_with("Series") {
+                    base_family.clone()
+                } else {
+                    format!("{base_family} Series")
+                };
+                out.push(CatalogCategoryItem::SubSeries {
+                    base_family,
+                    display_title,
+                    marketing_names: groups,
+                    total_models,
+                });
+            } else if let Some(single) = groups.into_iter().next() {
+                out.push(CatalogCategoryItem::SingleDevice(single));
+            }
+        }
+
+        out.sort_by(|a, b| natural_cmp(a.display_title(), b.display_title()));
+        out
     }
 }
 
@@ -390,5 +914,77 @@ mod tests {
 
         delete_galaxy_cache(&path).expect("delete cache");
         assert!(load_galaxy_cache(&path).is_none());
+    }
+
+    #[test]
+    fn classifies_series_and_groups_derivatives() {
+        assert_eq!(classify_root_series("Galaxy S24 Ultra"), GalaxyRootSeries::S);
+        assert_eq!(classify_root_series("Galaxy A55 5G"), GalaxyRootSeries::A);
+        assert_eq!(classify_root_series("Galaxy Ace 4"), GalaxyRootSeries::Other);
+        assert_eq!(classify_root_series("Galaxy M14 5G"), GalaxyRootSeries::M);
+        assert_eq!(classify_root_series("Galaxy Mega 6.3"), GalaxyRootSeries::Other);
+        assert_eq!(classify_root_series("Galaxy Z Fold6"), GalaxyRootSeries::Z);
+        assert_eq!(classify_root_series("Galaxy Fold 5G"), GalaxyRootSeries::Z);
+        assert_eq!(classify_root_series("Galaxy Folder2"), GalaxyRootSeries::Other);
+        assert_eq!(classify_root_series("Galaxy Tab S9 Ultra"), GalaxyRootSeries::Tab);
+        assert_eq!(classify_root_series("Galaxy Tab Active5"), GalaxyRootSeries::Tab);
+
+        assert_eq!(
+            classify_tab_series("Galaxy Tab S9 Ultra"),
+            Some(GalaxyTabSeries::TabS)
+        );
+        assert_eq!(
+            classify_tab_series("Galaxy Tab A9+"),
+            Some(GalaxyTabSeries::TabA)
+        );
+        assert_eq!(
+            classify_tab_series("Galaxy Tab Active5"),
+            Some(GalaxyTabSeries::OtherTab)
+        );
+
+        let cache = GalaxyDeviceCache {
+            synced_at_unix: 100,
+            devices: vec![
+                GalaxyDevice {
+                    marketing_name: "Galaxy S24".to_owned(),
+                    device: "e1s".to_owned(),
+                    model: "SM-S921B".to_owned(),
+                },
+                GalaxyDevice {
+                    marketing_name: "Galaxy S24".to_owned(),
+                    device: "e1q".to_owned(),
+                    model: "SM-S921U".to_owned(),
+                },
+                GalaxyDevice {
+                    marketing_name: "Galaxy S24 Ultra".to_owned(),
+                    device: "e3q".to_owned(),
+                    model: "SM-S928B".to_owned(),
+                },
+                GalaxyDevice {
+                    marketing_name: "Galaxy S8".to_owned(),
+                    device: "dreamlte".to_owned(),
+                    model: "SM-G950F".to_owned(),
+                },
+            ],
+        };
+        let catalog = DeviceCatalog::from_cache(&cache);
+        let items = catalog.category_items(GalaxyRootSeries::S, None);
+        assert_eq!(items.len(), 2);
+        // Natural sort puts Galaxy S8 before Galaxy S24 Series
+        assert_eq!(items[0].display_title(), "Galaxy S8");
+        assert_eq!(items[1].display_title(), "Galaxy S24 Series");
+        if let CatalogCategoryItem::SubSeries {
+            marketing_names,
+            total_models,
+            ..
+        } = &items[1]
+        {
+            assert_eq!(marketing_names.len(), 2);
+            assert_eq!(*total_models, 3);
+            assert_eq!(marketing_names[0].marketing_name, "Galaxy S24");
+            assert_eq!(marketing_names[0].models.len(), 2);
+        } else {
+            panic!("expected SubSeries for Galaxy S24");
+        }
     }
 }

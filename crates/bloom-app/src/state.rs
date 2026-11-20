@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bloom_core::{
-    AdbMdnsService, ConnectedSamsungDevice, DeviceCatalog, HistoryItem, HistoryResult,
+    AdbMdnsService, ConnectedSamsungDevice, DeviceCatalog, GalaxyDevice, GalaxyRootSeries,
+    GalaxyTabSeries, HistoryItem, HistoryResult,
 };
 use egui::Color32;
 use egui_twoui::prelude::TwoUiIcon;
@@ -19,6 +20,36 @@ pub const ACCENT_PRESETS: [(&str, Color32); 5] = [
     ("Sunset Orange", Color32::from_rgb(0xE6, 0x5B, 0x17)),
     ("Crimson Rose", Color32::from_rgb(0xE1, 0x4B, 0x6E)),
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BrowseNavState {
+    #[default]
+    Root,
+    TabRoot,
+    Category {
+        root: GalaxyRootSeries,
+        tab_sub: Option<GalaxyTabSeries>,
+    },
+    SubSeries {
+        root: GalaxyRootSeries,
+        tab_sub: Option<GalaxyTabSeries>,
+        base_family: String,
+        display_title: String,
+    },
+    ModelVariants {
+        root: Option<GalaxyRootSeries>,
+        tab_sub: Option<GalaxyTabSeries>,
+        sub_series: Option<(String, String)>,
+        marketing_name: String,
+    },
+    RegionPicker {
+        root: Option<GalaxyRootSeries>,
+        tab_sub: Option<GalaxyTabSeries>,
+        sub_series: Option<(String, String)>,
+        from_builds_grid: bool,
+        device: GalaxyDevice,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BloomPage {
@@ -63,7 +94,7 @@ impl BloomPage {
 
     pub fn icon(self) -> TwoUiIcon {
         match self {
-            Self::Browse => TwoUiIcon::ListGrid,
+            Self::Browse => TwoUiIcon::Search,
             Self::Decrypt => TwoUiIcon::SecurityOutline,
             Self::Settings => TwoUiIcon::SettingsOutline,
             Self::About => TwoUiIcon::InfoOutline,
@@ -77,6 +108,8 @@ impl BloomPage {
 pub struct AppConfig {
     pub model: String,
     pub csc: String,
+    pub default_csc: String,
+    pub dont_ask_default_csc: bool,
     pub manual_fw: String,
     pub imei: String,
     pub output_dir: String,
@@ -99,6 +132,8 @@ impl Default for AppConfig {
         Self {
             model: String::new(),
             csc: String::new(),
+            default_csc: String::new(),
+            dont_ask_default_csc: false,
             manual_fw: String::new(),
             imei: String::new(),
             output_dir: default_output_dir(),

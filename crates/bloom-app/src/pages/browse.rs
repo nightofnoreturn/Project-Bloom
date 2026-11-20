@@ -1,21 +1,28 @@
 use bloom_core::{
-    ChangelogLang, ConnectedSamsungDevice, CscItem, DecodedBuildCode, FirmwareUpdateType,
-    GalaxyDevice, HistoryItem,
+    CatalogCategoryItem, CatalogMarketingGroup, ChangelogLang, ConnectedSamsungDevice, CscItem,
+    DecodedBuildCode, FirmwareUpdateType, GalaxyDevice, GalaxyRootSeries, GalaxyTabSeries,
+    HistoryItem,
 };
 use egui::{
-    pos2, vec2, Align, Color32, CornerRadius, Frame, Margin, Rect, RichText, ScrollArea, Sense,
-    Stroke, StrokeKind, Ui,
+    pos2, vec2, Align, Color32, CornerRadius, Frame, Id, Margin, Rect, RichText, Sense, Stroke,
+    StrokeKind, Ui,
 };
 use egui_twoui::feedback::{interaction_factors, paint_state_overlay, recoil_rect};
 use egui_twoui::prelude::*;
 
 use crate::state::{
     extract_emblem_text, format_firmware_tile_title, format_tile_date, short_build_tail, BloomPage,
+    BrowseNavState,
 };
 use crate::widgets::{key_value_row, pill_tag, status_banner};
 use crate::BloomApp;
 
 const MAX_DEVICE_LIST_ROWS: usize = 120;
+
+enum SearchResultRow {
+    MarketingGroup(String),
+    SpecificModel(String, GalaxyDevice),
+}
 
 fn installed_build_for_model(
     connected: &[ConnectedSamsungDevice],
@@ -29,7 +36,162 @@ fn installed_build_for_model(
         .filter(|s| !s.is_empty())
 }
 
+fn render_browse_step_header(ui: &mut Ui, title: &str, subtitle: Option<&str>) -> bool {
+    let theme = theme_from_ui(ui);
+    let p = &theme.palette;
+    let mut back_clicked = false;
+
+    CardSection::new()
+        .inner_margin(Margin::symmetric(14, 10))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if ui
+                    .add(
+                        TwoUiIconButton::new(TwoUiIcon::Back)
+                            .size(34.0)
+                            .icon_size(18.0)
+                            .tint(p.text_primary),
+                    )
+                    .clicked()
+                {
+                    back_clicked = true;
+                }
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(
+                        RichText::new(title)
+                            .font(font_id(ui, 15.5, TwoUiFontWeight::SemiBold))
+                            .color(p.text_primary),
+                    );
+                    if let Some(sub) = subtitle.filter(|s| !s.trim().is_empty()) {
+                        ui.label(
+                            RichText::new(sub)
+                                .font(font_id(ui, 12.5, TwoUiFontWeight::Regular))
+                                .color(p.text_muted),
+                        );
+                    }
+                });
+            });
+        });
+    ui.add_space(12.0);
+    back_clicked
+}
+
 impl BloomApp {
+    pub fn render_browse_floating_search_bar(&mut self, ui: &mut Ui) {
+        let has_text = !self.device_search_query.is_empty();
+        let is_expanded = self.browse_search_focused || has_text;
+        let t = animate_toggle(
+            ui,
+            Id::unique("bloom_browse_search_expand_t"),
+            is_expanded,
+            0.24,
+            ease_fast_out_slow_in,
+        );
+        let full_w = ui.max_rect().width().max(200.0);
+        let compact_w = 148.0_f32.min(full_w);
+        let cur_w = egui::lerp(compact_w..=full_w, t);
+
+        ui.set_width(cur_w);
+        ui.set_max_width(cur_w);
+
+        let (search_resp, back_clicked) = TwoUiSearchBar::new(&mut self.device_search_query)
+            .hint("Search")
+            .show_back_button(is_expanded)
+            .floating(true)
+            .show(ui);
+
+        let pill_rect = ui.min_rect();
+        let clicked_inside_pill = !back_clicked
+            && ui.input(|i| {
+                i.pointer.primary_clicked()
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|pos| pill_rect.contains(pos))
+            });
+        if clicked_inside_pill && !search_resp.has_focus() {
+            search_resp.request_focus();
+        }
+
+        if search_resp.changed()
+            && self.selected_my_device.is_some()
+            && self.selected_my_region.is_some()
+        {
+            self.selected_my_device = None;
+            self.selected_my_region = None;
+            self.selected_grid_build = None;
+            self.build_detail_sheet_open = false;
+        }
+
+        if back_clicked {
+            self.device_search_query.clear();
+            search_resp.surrender_focus();
+            self.browse_search_focused = false;
+        } else {
+            self.browse_search_focused = search_resp.has_focus();
+        }
+    }
+
+    pub fn navigate_browse_back(&mut self) {
+        self.device_search_query.clear();
+        match self.browse_nav.clone() {
+            BrowseNavState::Root => {}
+            BrowseNavState::TabRoot => {
+                self.browse_nav = BrowseNavState::Root;
+            }
+            BrowseNavState::Category { root, tab_sub } => {
+                if root == GalaxyRootSeries::Tab && tab_sub.is_some() {
+                    self.browse_nav = BrowseNavState::TabRoot;
+                } else {
+                    self.browse_nav = BrowseNavState::Root;
+                }
+            }
+            BrowseNavState::SubSeries { root, tab_sub, .. } => {
+                self.browse_nav = BrowseNavState::Category { root, tab_sub };
+            }
+            BrowseNavState::ModelVariants {
+                root,
+                tab_sub,
+                sub_series,
+                ..
+            } => {
+                if let (Some(root), Some((base_family, display_title))) = (root, sub_series) {
+                    self.browse_nav = BrowseNavState::SubSeries {
+                        root,
+                        tab_sub,
+                        base_family,
+                        display_title,
+                    };
+                } else if let Some(root) = root {
+                    self.browse_nav = BrowseNavState::Category { root, tab_sub };
+                } else {
+                    self.browse_nav = BrowseNavState::Root;
+                }
+            }
+            BrowseNavState::RegionPicker {
+                root,
+                tab_sub,
+                sub_series,
+                from_builds_grid,
+                device,
+            } => {
+                if from_builds_grid && self.selected_my_region.is_some() {
+                    self.selected_my_device = Some(device);
+                } else if root.is_some() || sub_series.is_some() {
+                    self.browse_nav = BrowseNavState::ModelVariants {
+                        root,
+                        tab_sub,
+                        sub_series,
+                        marketing_name: device.marketing_name,
+                    };
+                } else {
+                    self.browse_nav = BrowseNavState::Root;
+                }
+            }
+        }
+    }
+
     pub fn render_browse_page(&mut self, ui: &mut Ui) {
         let snap = match self.shared.lock() {
             Ok(g) => (
@@ -61,29 +223,8 @@ impl BloomApp {
 
         let theme = theme_from_ui(ui);
         let p = &theme.palette;
-        let has_selected_device = self.selected_my_device.is_some();
-
-        let (search_resp, back_clicked) = TwoUiSearchBar::new(&mut self.device_search_query)
-            .hint("Search")
-            .show_back_button(has_selected_device)
-            .floating(true)
-            .show(ui);
-
-        if search_resp.changed() && has_selected_device {
-            self.selected_my_device = None;
-            self.selected_my_region = None;
-            self.selected_grid_build = None;
-            self.build_detail_sheet_open = false;
-        }
-        if back_clicked {
-            self.selected_my_device = None;
-            self.selected_my_region = None;
-            self.selected_grid_build = None;
-            self.build_detail_sheet_open = false;
-        }
 
         if db_syncing && catalog_len > 0 {
-            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.add(TwoUiSpinner::indeterminate(SpinnerSize::Small));
                 ui.add_space(8.0);
@@ -93,22 +234,31 @@ impl BloomApp {
                         .color(p.text_muted),
                 );
             });
+            ui.add_space(8.0);
         }
 
-        ui.add_space(12.0);
+        if !matches!(self.browse_nav, BrowseNavState::RegionPicker { .. }) {
+            if let (Some(dev), Some(region)) =
+                (self.selected_my_device.clone(), self.selected_my_region.clone())
+            {
+                self.render_selected_device_grid(
+                    ui,
+                    &dev,
+                    &region,
+                    builds_loading,
+                    builds_error.as_deref(),
+                    builds_opt.as_ref(),
+                    &connected_devices,
+                );
+                ui.add_space(64.0);
+                return;
+            }
+        }
 
-        if let (Some(dev), Some(region)) =
-            (self.selected_my_device.clone(), self.selected_my_region.clone())
-        {
-            self.render_selected_device_grid(
-                ui,
-                &dev,
-                &region,
-                builds_loading,
-                builds_error.as_deref(),
-                builds_opt.as_ref(),
-                &connected_devices,
-            );
+        // Inline Region Picker Category View (replaces the old bottom sheet)
+        if let BrowseNavState::RegionPicker { ref device, .. } = self.browse_nav.clone() {
+            self.render_inline_region_category(ui, device);
+            ui.add_space(64.0);
             return;
         }
 
@@ -141,18 +291,314 @@ impl BloomApp {
             }
         }
 
-        // Cached multi-token search across in-memory Galaxy catalog
+        if !query_trimmed.is_empty() {
+            self.render_browse_search_results(ui, &query_trimmed, catalog_rev, db_syncing);
+            ui.add_space(64.0);
+            return;
+        }
+
+        self.render_browse_category_hierarchy(ui);
+        ui.add_space(64.0);
+    }
+
+    fn render_inline_region_category(&mut self, ui: &mut Ui, dev: &GalaxyDevice) {
+        let theme = theme_from_ui(ui);
+        let p = &theme.palette;
+
+        if render_browse_step_header(ui, "Region", Some(&dev.display_label())) {
+            self.navigate_browse_back();
+            return;
+        }
+
+        let ordered = self.csc_db.search(self.device_search_query.trim());
+        if ordered.is_empty() {
+            CardSection::new()
+                .inner_margin(Margin::symmetric(20, 18))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("No results")
+                            .font(font_id(ui, 14.5, TwoUiFontWeight::Medium))
+                            .color(p.text_muted),
+                    );
+                });
+            return;
+        }
+
+        let mut chosen_region: Option<CscItem> = None;
+        CardSection::new()
+            .inner_margin(Margin::symmetric(0, 6))
+            .show(ui, |ui| {
+                for (idx, item) in ordered.iter().enumerate() {
+                    let mut row = CardItem::new(item.region_label())
+                        .chevron()
+                        .top_divider(idx > 0);
+                    if let Some(carriers) = item.carrier_summary() {
+                        row = row.summary(carriers);
+                    }
+                    if ui.add(row).clicked() {
+                        chosen_region = Some((*item).clone());
+                    }
+                }
+            });
+
+        if let Some(region) = chosen_region {
+            self.handle_region_chosen_in_browse(dev.clone(), region, ui.ctx());
+        }
+    }
+
+    fn render_browse_category_hierarchy(&mut self, ui: &mut Ui) {
+        match self.browse_nav.clone() {
+            BrowseNavState::Root => {
+                let mut picked_root: Option<GalaxyRootSeries> = None;
+                CardSection::new()
+                    .inner_margin(Margin::symmetric(0, 6))
+                    .show(ui, |ui| {
+                        for (idx, series) in GalaxyRootSeries::ALL.iter().copied().enumerate() {
+                            if ui
+                                .add(
+                                    CardItem::new(series.title())
+                                        .chevron()
+                                        .top_divider(idx > 0),
+                                )
+                                .clicked()
+                            {
+                                picked_root = Some(series);
+                            }
+                        }
+                    });
+                if let Some(root) = picked_root {
+                    if root == GalaxyRootSeries::Tab {
+                        self.browse_nav = BrowseNavState::TabRoot;
+                    } else {
+                        self.browse_nav = BrowseNavState::Category {
+                            root,
+                            tab_sub: None,
+                        };
+                    }
+                }
+            }
+            BrowseNavState::TabRoot => {
+                if render_browse_step_header(ui, GalaxyRootSeries::Tab.title(), None) {
+                    self.navigate_browse_back();
+                    return;
+                }
+                let tab_series = self
+                    .shared
+                    .lock()
+                    .map(|g| g.device_catalog.available_tab_series())
+                    .unwrap_or_default();
+                let mut picked_tab: Option<GalaxyTabSeries> = None;
+                CardSection::new()
+                    .inner_margin(Margin::symmetric(0, 6))
+                    .show(ui, |ui| {
+                        for (idx, sub) in tab_series.iter().copied().enumerate() {
+                            if ui
+                                .add(CardItem::new(sub.title()).chevron().top_divider(idx > 0))
+                                .clicked()
+                            {
+                                picked_tab = Some(sub);
+                            }
+                        }
+                    });
+                if let Some(sub) = picked_tab {
+                    self.browse_nav = BrowseNavState::Category {
+                        root: GalaxyRootSeries::Tab,
+                        tab_sub: Some(sub),
+                    };
+                }
+            }
+            BrowseNavState::Category { root, tab_sub } => {
+                let title = tab_sub.map(|s| s.title()).unwrap_or_else(|| root.title());
+                let subtitle = tab_sub.map(|_| GalaxyRootSeries::Tab.title());
+                if render_browse_step_header(ui, title, subtitle) {
+                    self.navigate_browse_back();
+                    return;
+                }
+
+                let items: Vec<CatalogCategoryItem> = self
+                    .shared
+                    .lock()
+                    .map(|g| g.device_catalog.category_items(root, tab_sub))
+                    .unwrap_or_default();
+
+                let mut next_nav: Option<BrowseNavState> = None;
+                CardSection::new()
+                    .inner_margin(Margin::symmetric(0, 6))
+                    .show(ui, |ui| {
+                        for (idx, item) in items.into_iter().enumerate() {
+                            match item {
+                                CatalogCategoryItem::SubSeries {
+                                    base_family,
+                                    display_title,
+                                    ..
+                                } => {
+                                    if ui
+                                        .add(
+                                            CardItem::new(&display_title)
+                                                .chevron()
+                                                .top_divider(idx > 0),
+                                        )
+                                        .clicked()
+                                    {
+                                        next_nav = Some(BrowseNavState::SubSeries {
+                                            root,
+                                            tab_sub,
+                                            base_family,
+                                            display_title,
+                                        });
+                                    }
+                                }
+                                CatalogCategoryItem::SingleDevice(group) => {
+                                    if ui
+                                        .add(
+                                            CardItem::new(&group.marketing_name)
+                                                .chevron()
+                                                .top_divider(idx > 0),
+                                        )
+                                        .clicked()
+                                    {
+                                        next_nav = Some(BrowseNavState::ModelVariants {
+                                            root: Some(root),
+                                            tab_sub,
+                                            sub_series: None,
+                                            marketing_name: group.marketing_name,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    });
+
+                if let Some(nav) = next_nav {
+                    self.browse_nav = nav;
+                }
+            }
+            BrowseNavState::SubSeries {
+                root,
+                tab_sub,
+                base_family,
+                display_title,
+            } => {
+                let parent_title = tab_sub.map(|s| s.title()).unwrap_or_else(|| root.title());
+                if render_browse_step_header(ui, &display_title, Some(parent_title)) {
+                    self.navigate_browse_back();
+                    return;
+                }
+
+                let groups: Vec<CatalogMarketingGroup> = self
+                    .shared
+                    .lock()
+                    .map(|g| {
+                        g.device_catalog
+                            .category_items(root, tab_sub)
+                            .into_iter()
+                            .find_map(|item| match item {
+                                CatalogCategoryItem::SubSeries {
+                                    base_family: fam,
+                                    marketing_names,
+                                    ..
+                                } if fam.eq_ignore_ascii_case(&base_family) => {
+                                    Some(marketing_names)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+
+                let mut picked_marketing: Option<String> = None;
+                CardSection::new()
+                    .inner_margin(Margin::symmetric(0, 6))
+                    .show(ui, |ui| {
+                        for (idx, group) in groups.into_iter().enumerate() {
+                            if ui
+                                .add(
+                                    CardItem::new(&group.marketing_name)
+                                        .chevron()
+                                        .top_divider(idx > 0),
+                                )
+                                .clicked()
+                            {
+                                picked_marketing = Some(group.marketing_name);
+                            }
+                        }
+                    });
+
+                if let Some(marketing_name) = picked_marketing {
+                    self.browse_nav = BrowseNavState::ModelVariants {
+                        root: Some(root),
+                        tab_sub,
+                        sub_series: Some((base_family, display_title)),
+                        marketing_name,
+                    };
+                }
+            }
+            BrowseNavState::ModelVariants {
+                root,
+                tab_sub,
+                sub_series,
+                marketing_name,
+            } => {
+                let parent_sub = sub_series
+                    .as_ref()
+                    .map(|(_, t)| t.as_str())
+                    .or_else(|| tab_sub.map(|s| s.title()))
+                    .or_else(|| root.map(|r| r.title()));
+                if render_browse_step_header(ui, &marketing_name, parent_sub) {
+                    self.navigate_browse_back();
+                    return;
+                }
+
+                let models: Vec<GalaxyDevice> = self
+                    .shared
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.device_catalog.find_marketing_group(&marketing_name))
+                    .map(|g| g.models)
+                    .unwrap_or_default();
+
+                let mut picked_model: Option<GalaxyDevice> = None;
+                CardSection::new()
+                    .inner_margin(Margin::symmetric(0, 6))
+                    .show(ui, |ui| {
+                        for (idx, dev) in models.into_iter().enumerate() {
+                            if ui
+                                .add(CardItem::new(&dev.model).chevron().top_divider(idx > 0))
+                                .clicked()
+                            {
+                                picked_model = Some(dev);
+                            }
+                        }
+                    });
+
+                if let Some(dev) = picked_model {
+                    self.select_model_in_browse(dev, ui.ctx());
+                }
+            }
+            BrowseNavState::RegionPicker { .. } => {}
+        }
+    }
+
+    fn render_browse_search_results(
+        &mut self,
+        ui: &mut Ui,
+        query_trimmed: &str,
+        catalog_rev: u64,
+        db_syncing: bool,
+    ) {
+        let theme = theme_from_ui(ui);
+        let p = &theme.palette;
+
         if self.device_search_cached_query != query_trimmed
             || self.device_search_cached_rev != catalog_rev
         {
             if let Ok(guard) = self.shared.lock() {
-                let (indices, total) =
-                    guard
-                        .device_catalog
-                        .search_indices(&query_trimmed, MAX_DEVICE_LIST_ROWS);
+                let (indices, total) = guard
+                    .device_catalog
+                    .search_indices(query_trimmed, MAX_DEVICE_LIST_ROWS);
                 self.device_search_cached_indices = indices;
                 self.device_search_cached_total = total;
-                self.device_search_cached_query = query_trimmed.clone();
+                self.device_search_cached_query = query_trimmed.to_owned();
                 self.device_search_cached_rev = catalog_rev;
             }
         }
@@ -171,14 +617,34 @@ impl BloomApp {
             Vec::new()
         };
 
-        let total_matches = self.device_search_cached_total;
+        let query_lower = query_trimmed.to_ascii_lowercase();
+        let query_tokens: Vec<&str> = query_lower.split_whitespace().collect();
+        let mut display_rows: Vec<SearchResultRow> = Vec::new();
+        let mut seen_marketing: Vec<String> = Vec::new();
+
+        for (label, dev) in &catalog_rows {
+            let name_lower = dev.marketing_name.to_ascii_lowercase();
+            let all_tokens_in_name = query_tokens.iter().all(|t| name_lower.contains(t));
+            if all_tokens_in_name {
+                if !seen_marketing
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(&dev.marketing_name))
+                {
+                    seen_marketing.push(dev.marketing_name.clone());
+                    display_rows.push(SearchResultRow::MarketingGroup(dev.marketing_name.clone()));
+                }
+            } else {
+                display_rows.push(SearchResultRow::SpecificModel(label.clone(), dev.clone()));
+            }
+        }
+
         let query_upper = query_trimmed.to_ascii_uppercase();
         let show_manual_fallback = query_upper.len() >= 4
             && !catalog_rows
                 .iter()
                 .any(|(_, d)| d.model.eq_ignore_ascii_case(&query_upper));
 
-        if catalog_rows.is_empty() && !show_manual_fallback {
+        if display_rows.is_empty() && !show_manual_fallback {
             if !db_syncing {
                 CardSection::new()
                     .inner_margin(Margin::symmetric(20, 18))
@@ -194,6 +660,7 @@ impl BloomApp {
         }
 
         let mut picked_device: Option<GalaxyDevice> = None;
+        let mut picked_group: Option<String> = None;
 
         CardSection::new()
             .inner_margin(Margin::symmetric(0, 6))
@@ -218,31 +685,132 @@ impl BloomApp {
                     row_num += 1;
                 }
 
-                for (label, dev) in catalog_rows {
-                    if ui
-                        .add(CardItem::new(label).top_divider(row_num > 0))
-                        .clicked()
-                    {
-                        picked_device = Some(dev);
+                for row in display_rows {
+                    match row {
+                        SearchResultRow::MarketingGroup(marketing_name) => {
+                            if ui
+                                .add(
+                                    CardItem::new(&marketing_name)
+                                        .chevron()
+                                        .top_divider(row_num > 0),
+                                )
+                                .clicked()
+                            {
+                                picked_group = Some(marketing_name);
+                            }
+                        }
+                        SearchResultRow::SpecificModel(label, dev) => {
+                            if ui
+                                .add(CardItem::new(label).chevron().top_divider(row_num > 0))
+                                .clicked()
+                            {
+                                picked_device = Some(dev);
+                            }
+                        }
                     }
                     row_num += 1;
                 }
             });
 
-        if total_matches > MAX_DEVICE_LIST_ROWS {
-            let cap = format!("{MAX_DEVICE_LIST_ROWS} / {total_matches}");
-            TwoUiPreferenceCaption::new(&cap).show(ui);
-        }
-
-        if let Some(dev) = picked_device {
-            self.open_region_picker_for(dev);
+        if let Some(marketing_name) = picked_group {
+            self.device_search_query.clear();
+            self.browse_search_focused = false;
+            self.browse_nav = BrowseNavState::ModelVariants {
+                root: None,
+                tab_sub: None,
+                sub_series: None,
+                marketing_name,
+            };
+        } else if let Some(dev) = picked_device {
+            self.device_search_query.clear();
+            self.browse_search_focused = false;
+            self.select_model_in_browse(dev, ui.ctx());
         }
     }
 
+    pub(crate) fn select_model_in_browse(&mut self, dev: GalaxyDevice, ctx: &egui::Context) {
+        let def_code = self.config.default_csc.trim();
+        if !def_code.is_empty() {
+            if let Some(default_region) = self.csc_db.find_exact(def_code).cloned() {
+                self.apply_browse_device_and_region(dev, default_region, ctx);
+                return;
+            }
+        }
+        self.open_region_picker_for(dev);
+    }
+
     pub(crate) fn open_region_picker_for(&mut self, dev: GalaxyDevice) {
-        self.region_sheet_device = Some(dev);
-        self.region_sheet_query.clear();
-        self.region_sheet_open = true;
+        self.device_search_query.clear();
+        self.browse_search_focused = false;
+        let (root, tab_sub, sub_series, from_builds_grid) = match self.browse_nav.clone() {
+            BrowseNavState::ModelVariants {
+                root,
+                tab_sub,
+                sub_series,
+                ..
+            } => (root, tab_sub, sub_series, self.selected_my_region.is_some()),
+            BrowseNavState::RegionPicker {
+                root,
+                tab_sub,
+                sub_series,
+                from_builds_grid,
+                ..
+            } => (root, tab_sub, sub_series, from_builds_grid),
+            _ => (None, None, None, self.selected_my_region.is_some()),
+        };
+        self.browse_nav = BrowseNavState::RegionPicker {
+            root,
+            tab_sub,
+            sub_series,
+            from_builds_grid,
+            device: dev,
+        };
+    }
+
+    pub(crate) fn handle_region_chosen_in_browse(
+        &mut self,
+        dev: GalaxyDevice,
+        region: CscItem,
+        ctx: &egui::Context,
+    ) {
+        if self.config.default_csc.trim().is_empty() && !self.config.dont_ask_default_csc {
+            self.pending_default_region_selection = Some((dev, region));
+            self.dont_ask_default_csc_draft = false;
+            self.default_region_dialog_open = true;
+        } else {
+            self.apply_browse_device_and_region(dev, region, ctx);
+        }
+    }
+
+    pub(crate) fn apply_browse_device_and_region(
+        &mut self,
+        dev: GalaxyDevice,
+        region: CscItem,
+        ctx: &egui::Context,
+    ) {
+        self.device_search_query.clear();
+        self.browse_search_focused = false;
+        if let BrowseNavState::RegionPicker {
+            root,
+            tab_sub,
+            sub_series,
+            device,
+            ..
+        } = self.browse_nav.clone()
+        {
+            self.browse_nav = BrowseNavState::ModelVariants {
+                root,
+                tab_sub,
+                sub_series,
+                marketing_name: device.marketing_name,
+            };
+        }
+        self.selected_my_device = Some(dev.clone());
+        self.selected_my_region = Some(region.clone());
+        self.config.model = dev.model.clone();
+        self.config.csc = region.code.clone();
+        self.page_id = BloomPage::Browse.id();
+        self.fetch_builds_for_selection(&dev, &region, ctx);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -268,12 +836,25 @@ impl BloomApp {
             .and_then(DecodedBuildCode::decode)
             .map(|d| d.bootloader_level);
 
+        let mut close_builds_grid = false;
+
         // Compact selected device + region header card
         CardSection::new()
-            .inner_margin(Margin::symmetric(18, 12))
+            .inner_margin(Margin::symmetric(14, 12))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
+                    if ui
+                        .add(
+                            TwoUiIconButton::new(TwoUiIcon::Back)
+                                .size(34.0)
+                                .icon_size(18.0)
+                                .tint(p.text_primary),
+                        )
+                        .clicked()
+                    {
+                        close_builds_grid = true;
+                    }
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 3.0;
                         ui.horizontal(|ui| {
@@ -326,6 +907,14 @@ impl BloomApp {
                     });
                 });
             });
+
+        if close_builds_grid {
+            self.selected_my_device = None;
+            self.selected_my_region = None;
+            self.selected_grid_build = None;
+            self.build_detail_sheet_open = false;
+            return;
+        }
 
         ui.add_space(16.0);
 
@@ -624,76 +1213,53 @@ impl BloomApp {
         );
     }
 
-    pub fn render_region_picker_sheet(&mut self, ctx: &egui::Context) {
-        let Some(dev) = self.region_sheet_device.clone() else {
-            self.region_sheet_open = false;
-            return;
-        };
-        if !self.region_sheet_open {
+    pub fn render_default_region_dialog(&mut self, ctx: &egui::Context) {
+        if !self.default_region_dialog_open {
             return;
         }
+        let Some((_, ref region)) = self.pending_default_region_selection else {
+            self.default_region_dialog_open = false;
+            return;
+        };
 
-        let theme = theme_from_ctx(ctx);
-        let p = &theme.palette;
-        let mut chosen_region: Option<CscItem> = None;
+        let body = format!(
+            "Save {} as your default region? You can change this anytime in Settings.",
+            region.region_label()
+        );
 
-        TwoUiBottomSheet::new("browse_region_sheet", "Region")
-            .max_width(520.0)
-            .max_height(520.0)
-            .show(ctx, &mut self.region_sheet_open, |ui| {
-                ui.label(
-                    RichText::new(dev.display_label())
-                        .font(font_id(ui, 14.0, TwoUiFontWeight::Medium))
-                        .color(p.primary_high),
-                );
-                ui.add_space(8.0);
+        let action_idx =
+            TwoUiDialog::new("bloom_default_region_dialog", "Save default region?")
+                .body(&body)
+                .single_choice_option(&mut self.dont_ask_default_csc_draft, "Don't ask again")
+                .action(DialogAction::cancel("Cancel"))
+                .action(DialogAction::cancel("No"))
+                .action(DialogAction::primary("Yes"))
+                .show(ctx, &mut self.default_region_dialog_open, |_| {});
 
-                let _ = TwoUiSearchBar::new(&mut self.region_sheet_query)
-                    .hint("Search")
-                    .show(ui);
-                ui.add_space(10.0);
-
-                // Globally neutral A–Z list ordered by country/region name (zero geographic bias).
-                let ordered = self.csc_db.search(&self.region_sheet_query);
-
-                ScrollArea::vertical()
-                    .id_salt("region_sheet_scroll")
-                    .max_height(330.0)
-                    .show(ui, |ui| {
-                        if ordered.is_empty() {
-                            ui.label(
-                                RichText::new("No results")
-                                    .font(font_id(ui, 14.0, TwoUiFontWeight::Medium))
-                                    .color(p.text_muted),
-                            );
-                            return;
+        if let Some(idx) = action_idx {
+            if let Some((dev, region)) = self.pending_default_region_selection.take() {
+                match idx {
+                    0 => {
+                        // Cancel: remain on Region picker list without applying
+                    }
+                    1 => {
+                        if self.dont_ask_default_csc_draft {
+                            self.config.dont_ask_default_csc = true;
                         }
-                        CardSection::new()
-                            .fill(p.surface_container)
-                            .inner_margin(Margin::symmetric(0, 4))
-                            .show(ui, |ui| {
-                                for (idx, item) in ordered.iter().enumerate() {
-                                    let mut row =
-                                        CardItem::new(item.region_label()).top_divider(idx > 0);
-                                    if let Some(carriers) = item.carrier_summary() {
-                                        row = row.summary(carriers);
-                                    }
-                                    if ui.add(row).clicked() {
-                                        chosen_region = Some((*item).clone());
-                                    }
-                                }
-                            });
-                    });
-            });
-
-        if let Some(region) = chosen_region {
-            self.region_sheet_open = false;
-            self.selected_my_device = Some(dev.clone());
-            self.selected_my_region = Some(region.clone());
-            self.config.model = dev.model.clone();
-            self.config.csc = region.code.clone();
-            self.page_id = BloomPage::Browse.id();
-            self.fetch_builds_for_selection(&dev, &region, ctx);
+                        self.apply_browse_device_and_region(dev, region, ctx);
+                    }
+                    2 => {
+                        self.config.default_csc = region.code.clone();
+                        if self.dont_ask_default_csc_draft {
+                            self.config.dont_ask_default_csc = true;
+                        }
+                        self.apply_browse_device_and_region(dev, region, ctx);
+                    }
+                    _ => {}
+                }
+            }
+        } else if !self.default_region_dialog_open {
+            self.pending_default_region_selection = None;
         }
     }
 

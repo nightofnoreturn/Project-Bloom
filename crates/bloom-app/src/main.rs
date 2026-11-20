@@ -18,7 +18,7 @@ use egui::{Frame, Id};
 use egui_twoui::prelude::*;
 
 use state::{
-    AppConfig, BloomPage, DecryptForm, DeviceRightPane, SharedUiState, SnackAction,
+    AppConfig, BloomPage, BrowseNavState, DecryptForm, DeviceRightPane, SharedUiState, SnackAction,
     CONNECTED_DEVICE_PAGE_BASE, STORAGE_KEY,
 };
 use tasks::{spawn_manual_decrypt, spawn_scan_adb_devices, spawn_sync_galaxy_db};
@@ -170,6 +170,8 @@ pub struct BloomApp {
     pub device_render_textures: HashMap<String, egui::TextureHandle>,
 
     // Browse catalog & firmware grid state
+    pub browse_nav: BrowseNavState,
+    pub browse_search_focused: bool,
     pub device_search_query: String,
     pub device_search_cached_query: String,
     pub device_search_cached_rev: u64,
@@ -177,9 +179,9 @@ pub struct BloomApp {
     pub device_search_cached_total: usize,
     pub selected_my_device: Option<GalaxyDevice>,
     pub selected_my_region: Option<CscItem>,
-    pub region_sheet_open: bool,
-    pub region_sheet_device: Option<GalaxyDevice>,
-    pub region_sheet_query: String,
+    pub default_region_dialog_open: bool,
+    pub dont_ask_default_csc_draft: bool,
+    pub pending_default_region_selection: Option<(GalaxyDevice, CscItem)>,
     pub selected_grid_build: Option<HistoryItem>,
     pub build_detail_sheet_open: bool,
 
@@ -286,6 +288,8 @@ impl BloomApp {
             gl_available,
             device_render_textures: HashMap::new(),
 
+            browse_nav: BrowseNavState::Root,
+            browse_search_focused: false,
             device_search_query: String::new(),
             device_search_cached_query: String::new(),
             device_search_cached_rev: 0,
@@ -293,9 +297,9 @@ impl BloomApp {
             device_search_cached_total: 0,
             selected_my_device: None,
             selected_my_region: None,
-            region_sheet_open: false,
-            region_sheet_device: None,
-            region_sheet_query: String::new(),
+            default_region_dialog_open: false,
+            dont_ask_default_csc_draft: false,
+            pending_default_region_selection: None,
             selected_grid_build: None,
             build_detail_sheet_open: false,
 
@@ -598,9 +602,13 @@ impl eframe::App for BloomApp {
             current_page.title().to_owned()
         };
 
+        let is_browse_page = active_connected_idx.is_none() && current_page == BloomPage::Browse;
         let is_decrypt_page = active_connected_idx.is_none() && current_page == BloomPage::Decrypt;
-        self.snackbar
-            .set_bottom_offset(if is_decrypt_page { 88.0 } else { 24.0 });
+        self.snackbar.set_bottom_offset(if is_browse_page || is_decrypt_page {
+            88.0
+        } else {
+            24.0
+        });
 
         let panel_frame = Frame::NONE.fill(theme.palette.round_and_bg);
         egui::CentralPanel::default()
@@ -632,6 +640,17 @@ impl eframe::App for BloomApp {
                     self.drawer_open = !self.drawer_open;
                 }
 
+                if is_browse_page {
+                    show_bottom_floating_bar(
+                        ui,
+                        16.0,
+                        Id::unique("bloom_browse_floating_search"),
+                        |ui| {
+                            self.render_browse_floating_search_bar(ui);
+                        },
+                    );
+                }
+
                 if is_decrypt_page {
                     let mut dec_action: Option<usize> = None;
                     show_bottom_floating_bar(
@@ -661,8 +680,8 @@ impl eframe::App for BloomApp {
                 }
             });
 
-        // Browse region & build detail bottom sheets
-        self.render_region_picker_sheet(ui.ctx());
+        // Browse default-region confirmation dialog & build detail bottom sheet
+        self.render_default_region_dialog(ui.ctx());
         self.render_build_detail_sheet(ui.ctx());
 
         // Accent color picker dialog
