@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use egui::{vec2, Align, Frame, Layout, Margin, RichText, Ui};
+use egui::{vec2, Align, Frame, Layout, Margin, RichText, ScrollArea, Ui};
 use egui_twoui::prelude::*;
 
 use crate::state::{format_sync_age, ACCENT_PRESETS};
@@ -206,6 +206,36 @@ impl BloomApp {
                             });
                         });
                     });
+
+                let default_region_summary = match self.config.default_region_csc.as_deref() {
+                    Some(code) => self
+                        .csc_db
+                        .find_exact(code)
+                        .map(|item| item.region_label())
+                        .unwrap_or_else(|| code.to_owned()),
+                    None => "Not set".to_owned(),
+                };
+                if ui
+                    .add(
+                        CardItem::new("Default region")
+                            .summary(default_region_summary)
+                            .chevron()
+                            .top_divider(true),
+                    )
+                    .clicked()
+                {
+                    self.settings_region_query.clear();
+                    self.settings_region_dialog_open = true;
+                }
+
+                let mut ask_default = !self.config.dont_ask_default_region;
+                if SwitchItem::new(&mut ask_default, "Ask to set default region")
+                    .top_divider(true)
+                    .show(ui)
+                    .toggled
+                {
+                    self.config.dont_ask_default_region = !ask_default;
+                }
             });
 
         SectionHeader::new("Transfers").show(ui);
@@ -321,38 +351,6 @@ impl BloomApp {
                 Frame::NONE
                     .inner_margin(Margin::symmetric(20, 12))
                     .show(ui, |ui| {
-                        let def_region_hint = self
-                            .csc_db
-                            .find_exact(self.config.default_csc.trim())
-                            .map(|r| r.region_label());
-                        let resp = labeled_text_field(
-                            ui,
-                            "Default Region (CSC)",
-                            &mut self.config.default_csc,
-                            "None",
-                            def_region_hint.as_deref(),
-                            !is_busy,
-                        );
-                        if resp.changed() {
-                            self.config.default_csc =
-                                self.config.default_csc.trim().to_ascii_uppercase();
-                        }
-                    });
-
-                let mut ask_default_region = !self.config.dont_ask_default_csc;
-                if SwitchItem::new(&mut ask_default_region, "Ask to save default region")
-                    .top_divider(true)
-                    .enabled(!is_busy)
-                    .show(ui)
-                    .toggled
-                {
-                    self.config.dont_ask_default_csc = !ask_default_region;
-                }
-
-                paint_divider(ui, DividerInset::FullWidth);
-                Frame::NONE
-                    .inner_margin(Margin::symmetric(20, 12))
-                    .show(ui, |ui| {
                         labeled_text_field(
                             ui,
                             "IMEI (Optional)",
@@ -380,5 +378,71 @@ impl BloomApp {
                     self.reset_dialog_open = true;
                 }
             });
+    }
+
+    pub fn render_settings_region_dialog(&mut self, ctx: &egui::Context) {
+        if !self.settings_region_dialog_open {
+            return;
+        }
+
+        let theme = theme_from_ctx(ctx);
+        let p = &theme.palette;
+        let has_default = self.config.default_region_csc.is_some();
+        let mut picked_code: Option<String> = None;
+
+        let mut dlg = TwoUiDialog::new("bloom_settings_default_region_dialog", "Default region")
+            .width(440.0);
+        if has_default {
+            dlg = dlg
+                .action(DialogAction::destructive("Clear"))
+                .action(DialogAction::cancel("Close"));
+        } else {
+            dlg = dlg.action(DialogAction::cancel("Close"));
+        }
+
+        let query = &mut self.settings_region_query;
+        let csc_db = &self.csc_db;
+
+        let action = dlg.show(ctx, &mut self.settings_region_dialog_open, |ui| {
+            let _ = TwoUiSearchBar::new(query).hint("Search").show(ui);
+            ui.add_space(8.0);
+
+            let ordered = csc_db.search(query);
+            ScrollArea::vertical()
+                .id_salt("settings_region_scroll")
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    if ordered.is_empty() {
+                        ui.label(
+                            RichText::new("No results")
+                                .font(font_id(ui, 14.0, TwoUiFontWeight::Medium))
+                                .color(p.text_muted),
+                        );
+                        return;
+                    }
+                    CardSection::new()
+                        .fill(p.surface_container)
+                        .inner_margin(Margin::symmetric(0, 4))
+                        .show(ui, |ui| {
+                            for (idx, item) in ordered.iter().enumerate() {
+                                let mut row =
+                                    CardItem::new(item.region_label()).top_divider(idx > 0);
+                                if let Some(carriers) = item.carrier_summary() {
+                                    row = row.summary(carriers);
+                                }
+                                if ui.add(row).clicked() {
+                                    picked_code = Some(item.code.clone());
+                                }
+                            }
+                        });
+                });
+        });
+
+        if has_default && action == Some(0) {
+            self.config.default_region_csc = None;
+        } else if let Some(code) = picked_code {
+            self.config.default_region_csc = Some(code);
+            self.settings_region_dialog_open = false;
+        }
     }
 }

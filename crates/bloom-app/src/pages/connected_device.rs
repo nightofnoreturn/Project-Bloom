@@ -10,7 +10,8 @@ use egui_twoui::prelude::*;
 use egui_twoui::tokens::dimens;
 
 use crate::state::{
-    extract_android_number, short_build_tail, DeviceRenderState, DeviceRightPane, DeviceUpdateState,
+    extract_android_number, short_build_tail, BloomPage, BrowseStep, DeviceRenderState,
+    DeviceRightPane, DeviceUpdateState,
 };
 use crate::tasks::{spawn_check_device_update, spawn_fetch_device_render};
 use crate::BloomApp;
@@ -514,9 +515,17 @@ impl BloomApp {
         if open_version_history {
             let target = target_galaxy_device(dev, catalog_dev);
             let region = self.resolve_device_csc_item(dev);
+            self.selected_my_device = Some(target.clone());
+            self.selected_my_region = Some(region.clone());
+            self.config.model = target.model.clone();
+            self.config.csc = region.code.clone();
             self.device_right_pane = DeviceRightPane::Info;
             self.device_region_query.clear();
-            self.apply_browse_device_and_region(target, region, ui.ctx());
+            if matches!(self.browse_step, BrowseStep::RegionPicker { .. }) {
+                self.browse_step = BrowseStep::Categories;
+            }
+            self.page_id = BloomPage::Browse.id();
+            self.fetch_builds_for_selection(&target, &region, ui.ctx());
         }
     }
 
@@ -1037,9 +1046,17 @@ impl BloomApp {
 
         if let Some(region) = chosen_region {
             let target = target_galaxy_device(dev, catalog_dev);
+            self.selected_my_device = Some(target.clone());
+            self.selected_my_region = Some(region.clone());
+            self.config.model = target.model.clone();
+            self.config.csc = region.code.clone();
             self.device_right_pane = DeviceRightPane::Info;
             self.device_region_query.clear();
-            self.apply_browse_device_and_region(target, region, ui.ctx());
+            if matches!(self.browse_step, BrowseStep::RegionPicker { .. }) {
+                self.browse_step = BrowseStep::Categories;
+            }
+            self.page_id = BloomPage::Browse.id();
+            self.fetch_builds_for_selection(&target, &region, ui.ctx());
         }
     }
 }

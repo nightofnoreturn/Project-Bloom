@@ -21,12 +21,11 @@ pub use data::{
     country_name, BinaryFileInfo, CscDb, CscItem, ImeiDb, LatestVersionInfo, SmartBinaryInfo,
 };
 pub use devices::{
-    classify_root_series, classify_tab_series, decode_supported_devices_bytes,
-    default_device_cache_path, delete_galaxy_cache, extract_base_family,
-    fetch_and_cache_galaxy_devices, load_galaxy_cache, natural_cmp, parse_galaxy_devices_csv,
-    save_galaxy_cache, CatalogCategoryItem, CatalogMarketingGroup, DeviceCatalog, GalaxyDevice,
-    GalaxyDeviceCache, GalaxyRootSeries, GalaxyTabSeries, IndexedGalaxyDevice,
-    SUPPORTED_DEVICES_CSV_URL,
+    classify_galaxy_category, classify_tab_subcategory, decode_supported_devices_bytes,
+    default_device_cache_path, delete_galaxy_cache, extract_lineup_key,
+    fetch_and_cache_galaxy_devices, load_galaxy_cache, parse_galaxy_devices_csv, save_galaxy_cache,
+    DeviceCatalog, GalaxyCategory, GalaxyDevice, GalaxyDeviceCache, GalaxyLineupGroup,
+    GalaxyModelGroup, GalaxyTabSubCategory, IndexedGalaxyDevice, SUPPORTED_DEVICES_CSV_URL,
 };
 pub use downloader::{
     derive_output_filenames, download_and_decrypt, list_resumable_states, DownloadHandle,

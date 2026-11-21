@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bloom_core::{
-    AdbMdnsService, ConnectedSamsungDevice, DeviceCatalog, GalaxyDevice, GalaxyRootSeries,
-    GalaxyTabSeries, HistoryItem, HistoryResult,
+    AdbMdnsService, ConnectedSamsungDevice, DeviceCatalog, GalaxyCategory, GalaxyDevice,
+    GalaxyTabSubCategory, HistoryItem, HistoryResult,
 };
 use egui::Color32;
 use egui_twoui::prelude::TwoUiIcon;
@@ -20,36 +20,6 @@ pub const ACCENT_PRESETS: [(&str, Color32); 5] = [
     ("Sunset Orange", Color32::from_rgb(0xE6, 0x5B, 0x17)),
     ("Crimson Rose", Color32::from_rgb(0xE1, 0x4B, 0x6E)),
 ];
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum BrowseNavState {
-    #[default]
-    Root,
-    TabRoot,
-    Category {
-        root: GalaxyRootSeries,
-        tab_sub: Option<GalaxyTabSeries>,
-    },
-    SubSeries {
-        root: GalaxyRootSeries,
-        tab_sub: Option<GalaxyTabSeries>,
-        base_family: String,
-        display_title: String,
-    },
-    ModelVariants {
-        root: Option<GalaxyRootSeries>,
-        tab_sub: Option<GalaxyTabSeries>,
-        sub_series: Option<(String, String)>,
-        marketing_name: String,
-    },
-    RegionPicker {
-        root: Option<GalaxyRootSeries>,
-        tab_sub: Option<GalaxyTabSeries>,
-        sub_series: Option<(String, String)>,
-        from_builds_grid: bool,
-        device: GalaxyDevice,
-    },
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BloomPage {
@@ -108,8 +78,6 @@ impl BloomPage {
 pub struct AppConfig {
     pub model: String,
     pub csc: String,
-    pub default_csc: String,
-    pub dont_ask_default_csc: bool,
     pub manual_fw: String,
     pub imei: String,
     pub output_dir: String,
@@ -125,6 +93,8 @@ pub struct AppConfig {
     pub accent_rgb: [u8; 3],
     pub typography_idx: usize,
     pub history_lang_idx: usize,
+    pub default_region_csc: Option<String>,
+    pub dont_ask_default_region: bool,
 }
 
 impl Default for AppConfig {
@@ -132,8 +102,6 @@ impl Default for AppConfig {
         Self {
             model: String::new(),
             csc: String::new(),
-            default_csc: String::new(),
-            dont_ask_default_csc: false,
             manual_fw: String::new(),
             imei: String::new(),
             output_dir: default_output_dir(),
@@ -149,6 +117,8 @@ impl Default for AppConfig {
             accent_rgb: [0x38, 0x7A, 0xFF],
             typography_idx: 0,
             history_lang_idx: 0,
+            default_region_csc: None,
+            dont_ask_default_region: false,
         }
     }
 }
@@ -184,6 +154,34 @@ pub struct WirelessPairState {
     pub connecting: bool,
     pub last_success: Option<String>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BrowseStep {
+    #[default]
+    Categories,
+    TabSubCategories,
+    Lineups {
+        category: GalaxyCategory,
+        tab_sub: Option<GalaxyTabSubCategory>,
+    },
+    Models {
+        category: GalaxyCategory,
+        tab_sub: Option<GalaxyTabSubCategory>,
+        lineup_key: String,
+        lineup_title: String,
+    },
+    Variants {
+        category: GalaxyCategory,
+        tab_sub: Option<GalaxyTabSubCategory>,
+        lineup_key: Option<String>,
+        lineup_title: Option<String>,
+        marketing_name: String,
+    },
+    RegionPicker {
+        device: GalaxyDevice,
+        return_to_builds: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
