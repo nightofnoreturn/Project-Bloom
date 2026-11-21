@@ -245,7 +245,7 @@ impl BloomApp {
         );
         let ease_t = ease_cubic_directional(linear_t, is_expanded);
 
-        let collapsed_w = (if in_region_picker { 200.0 } else { 172.0 }).min(col_w);
+        let collapsed_w = (if in_region_picker { 200.0_f32 } else { 172.0_f32 }).min(col_w);
         let current_w = collapsed_w + (col_w - collapsed_w) * ease_t;
         let offset_x = col_center_x - ui.ctx().content_rect().center().x;
 
