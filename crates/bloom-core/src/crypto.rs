@@ -225,13 +225,11 @@ pub mod legacy {
         let cipher = aes::Aes256::new(&Array::from(key_arr));
 
         let mut buf = pad(input);
-        for chunk in buf.chunks_exact_mut(16) {
+        for chunk in buf.as_chunks_mut::<16>().0 {
             for (b, p) in chunk.iter_mut().zip(prev.iter()) {
                 *b ^= *p;
             }
-            let mut block_arr = [0u8; 16];
-            block_arr.copy_from_slice(chunk);
-            let mut block = Array::from(block_arr);
+            let mut block = Array::from(*chunk);
             cipher.encrypt_block(&mut block);
             chunk.copy_from_slice(&block);
             prev.copy_from_slice(&block);
@@ -252,9 +250,8 @@ pub mod legacy {
         let cipher = aes::Aes256::new(&Array::from(key_arr));
 
         let mut buf = input.to_vec();
-        for chunk in buf.chunks_exact_mut(16) {
-            let mut ct = [0u8; 16];
-            ct.copy_from_slice(chunk);
+        for chunk in buf.as_chunks_mut::<16>().0 {
+            let ct = *chunk;
             let mut block = Array::from(ct);
             cipher.decrypt_block(&mut block);
             for (b, p) in block.iter_mut().zip(prev.iter()) {
@@ -404,10 +401,8 @@ where
         buf[..n]
             .par_chunks_mut(PARALLEL_SUBCHUNK_SIZE)
             .for_each(|subchunk| {
-                for block_slice in subchunk.chunks_exact_mut(16) {
-                    let mut raw = [0u8; 16];
-                    raw.copy_from_slice(block_slice);
-                    let mut block = Array::from(raw);
+                for block_slice in subchunk.as_chunks_mut::<16>().0 {
+                    let mut block = Array::from(*block_slice);
                     cipher.decrypt_block(&mut block);
                     block_slice.copy_from_slice(&block);
                 }
@@ -480,10 +475,8 @@ mod tests {
         }
 
         let mut ciphertext = plaintext.clone();
-        for chunk in ciphertext.chunks_exact_mut(16) {
-            let mut raw = [0u8; 16];
-            raw.copy_from_slice(chunk);
-            let mut block = Array::from(raw);
+        for chunk in ciphertext.as_chunks_mut::<16>().0 {
+            let mut block = Array::from(*chunk);
             cipher.encrypt_block(&mut block);
             chunk.copy_from_slice(&block);
         }

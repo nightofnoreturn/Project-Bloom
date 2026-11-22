@@ -646,15 +646,15 @@ pub fn decode_supported_devices_bytes(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let payload = &bytes[2..];
         let mut units = Vec::with_capacity(payload.len() / 2);
-        for chunk in payload.chunks_exact(2) {
-            units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        for chunk in payload.as_chunks::<2>().0 {
+            units.push(u16::from_le_bytes(*chunk));
         }
         String::from_utf16_lossy(&units)
     } else if bytes.starts_with(&[0xFE, 0xFF]) {
         let payload = &bytes[2..];
         let mut units = Vec::with_capacity(payload.len() / 2);
-        for chunk in payload.chunks_exact(2) {
-            units.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+        for chunk in payload.as_chunks::<2>().0 {
+            units.push(u16::from_be_bytes(*chunk));
         }
         String::from_utf16_lossy(&units)
     } else {

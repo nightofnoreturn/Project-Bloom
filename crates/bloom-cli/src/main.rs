@@ -171,7 +171,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Csc { query } => {
             let db = CscDb::load_embedded();
             let matches = db.search(query.as_deref().unwrap_or(""));
-            println!("{:<6} {:<16} {}", "CSC", "Countries", "Carriers");
+            println!("{:<6} {:<16} Carriers", "CSC", "Countries");
             println!("{}", "-".repeat(60));
             for item in matches {
                 println!(
@@ -215,7 +215,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("#{:<2} {}{tag}", idx + 1, item.firmware);
                 println!("    OS: {os} | Date: {date} | Security Patch: {patch}");
                 if notes {
-                    if let Some(ref text) = item.changelog.as_ref().and_then(|c| c.notes.as_ref()) {
+                    if let Some(text) = item.changelog.as_ref().and_then(|c| c.notes.as_ref()) {
                         for line in text.lines() {
                             println!("      {line}");
                         }

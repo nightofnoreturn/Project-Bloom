@@ -442,7 +442,7 @@ pub fn generate_adb_qr_session() -> (String, String, String) {
     (service_name, password, payload)
 }
 
-fn first_non_empty_prop<'a>(props: &'a HashMap<String, String>, keys: &[&str]) -> Option<String> {
+fn first_non_empty_prop(props: &HashMap<String, String>, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| {
         props
             .get(*k)
