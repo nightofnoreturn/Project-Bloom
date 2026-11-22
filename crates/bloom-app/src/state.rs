@@ -305,6 +305,7 @@ pub struct FlashUiState {
     pub total_bytes: u64,
     pub logs: Vec<String>,
     pub last_error: Option<String>,
+    pub pending_error_dialog: Option<String>,
     pub completed_ok: bool,
 }
 
@@ -330,6 +331,7 @@ pub struct SharedUiState {
     pub active_downloads: Vec<ActiveDownloadJob>,
     pub completed_downloads: Vec<DownloadJobRecord>,
     pub newly_completed_count: usize,
+    #[allow(dead_code)]
     pub last_completed_output: Option<PathBuf>,
     pub flash: FlashUiState,
     pub error_message: Option<String>,

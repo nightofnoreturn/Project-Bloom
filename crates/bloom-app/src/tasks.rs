@@ -941,15 +941,18 @@ pub fn spawn_reboot_to_download_mode(
         match res {
             Ok(outcome) => {
                 if let Ok(mut guard) = shared.lock() {
-                    let msg = match outcome {
-                        bloom_core::odin::DownloadModeReboot::AlreadyInDownloadMode => {
-                            "Device is already in Download Mode."
-                        }
-                        bloom_core::odin::DownloadModeReboot::Sent => {
-                            "Reboot command sent. Waiting for Download Mode..."
-                        }
+                    let (log_msg, toast_msg) = match outcome {
+                        bloom_core::odin::DownloadModeReboot::AlreadyInDownloadMode => (
+                            "Device is already in Download Mode.",
+                            "Already in Download Mode",
+                        ),
+                        bloom_core::odin::DownloadModeReboot::Sent => (
+                            "Reboot command sent. Waiting for Download Mode...",
+                            "Rebooting to Download Mode...",
+                        ),
                     };
-                    guard.flash.logs.push(msg.to_owned());
+                    guard.flash.logs.push(log_msg.to_owned());
+                    guard.pending_toast = Some(toast_msg.to_owned());
                 }
                 ctx.request_repaint();
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -964,7 +967,8 @@ pub fn spawn_reboot_to_download_mode(
                 if let Ok(mut guard) = shared.lock() {
                     let msg = err.to_string();
                     guard.flash.last_error = Some(msg.clone());
-                    guard.flash.logs.push(msg);
+                    guard.flash.logs.push(msg.clone());
+                    guard.pending_toast = Some(msg);
                 }
             }
         }
@@ -993,6 +997,7 @@ pub fn spawn_odin_flash(
         guard.flash.total_bytes = 0;
         guard.flash.logs.clear();
         guard.flash.last_error = None;
+        guard.flash.pending_error_dialog = None;
         guard.flash.completed_ok = false;
     }
     ctx.request_repaint();
@@ -1057,6 +1062,7 @@ pub fn spawn_odin_flash(
                     guard.flash.stage = OdinFlashStage::Failed;
                     guard.flash.completed_ok = false;
                     guard.flash.last_error = Some(msg.clone());
+                    guard.flash.pending_error_dialog = Some(msg.clone());
                     guard.flash.logs.push(format!("Error: {msg}"));
                 }
             }

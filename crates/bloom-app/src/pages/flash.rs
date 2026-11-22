@@ -10,7 +10,6 @@ use egui_twoui::prelude::*;
 
 use crate::state::format_bytes;
 use crate::tasks::{spawn_odin_flash, spawn_probe_odin_device, spawn_reboot_to_download_mode};
-use crate::widgets::SwitchItem;
 use crate::BloomApp;
 
 impl BloomApp {

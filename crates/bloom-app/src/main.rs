@@ -230,6 +230,8 @@ pub struct BloomApp {
     pub flash_auto_reboot: bool,
     pub flash_verify_md5: bool,
     pub flash_wipe_confirm_open: bool,
+    pub flash_error_dialog_open: bool,
+    pub flash_error_dialog_msg: String,
     pub last_flash_probe: Instant,
 
     // Navigation & global overlays
@@ -368,6 +370,8 @@ impl BloomApp {
             flash_auto_reboot: true,
             flash_verify_md5: true,
             flash_wipe_confirm_open: false,
+            flash_error_dialog_open: false,
+            flash_error_dialog_msg: String::new(),
             last_flash_probe: initial_mdns_scan,
 
             page_id: BloomPage::Browse.id(),
@@ -518,7 +522,7 @@ impl eframe::App for BloomApp {
             device_has_update,
             active_download_count,
             newly_completed,
-            last_completed_output,
+            flash_error_pending,
         ): (
             bool,
             bool,
@@ -528,7 +532,7 @@ impl eframe::App for BloomApp {
             Vec<bool>,
             usize,
             usize,
-            Option<std::path::PathBuf>,
+            Option<String>,
         ) = match self.shared.lock() {
             Ok(mut g) => (
                 g.is_busy(),
@@ -549,7 +553,7 @@ impl eframe::App for BloomApp {
                     .filter(|j| !j.is_completed() && !j.canceled)
                     .count(),
                 std::mem::take(&mut g.newly_completed_count),
-                g.last_completed_output.take(),
+                g.flash.pending_error_dialog.take(),
             ),
             Err(_) => (
                 false,
@@ -575,16 +579,12 @@ impl eframe::App for BloomApp {
             } else {
                 format!("{newly_completed} downloads have been completed")
             };
-            if let Some(out_dir) = last_completed_output {
-                self.show_snackbar_with_action(
-                    ui.ctx(),
-                    msg,
-                    Some("Open folder"),
-                    SnackAction::OpenFolder(out_dir),
-                );
-            } else {
-                self.snackbar.show_message(ui.ctx(), msg, None::<&str>);
-            }
+            self.toast.show_message(ui.ctx(), msg, 2.8);
+        }
+
+        if let Some(err_msg) = flash_error_pending {
+            self.flash_error_dialog_msg = err_msg;
+            self.flash_error_dialog_open = true;
         }
 
         if self.last_usb_scan.elapsed() >= Duration::from_secs(3) {
@@ -900,6 +900,13 @@ impl eframe::App for BloomApp {
                 );
             }
         }
+
+        // Crucial error dialog for Odin flash failures
+        let flash_err_body = self.flash_error_dialog_msg.clone();
+        let _ = TwoUiDialog::new("bloom_flash_error_dialog", "Flash failed")
+            .body(&flash_err_body)
+            .action(DialogAction::primary("OK"))
+            .show(ui.ctx(), &mut self.flash_error_dialog_open, |_| {});
 
         // USB debugging requirement modal dialog
         let non_adb_body = self

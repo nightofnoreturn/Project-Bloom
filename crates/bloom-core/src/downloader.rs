@@ -25,7 +25,9 @@ pub use crate::planner::{
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SEGMENT_RETRIES: usize = 60;
+#[cfg(windows)]
 const DISK_SPACE_MARGIN: u64 = 128 * 1024 * 1024;
+#[cfg(windows)]
 const FAT32_MAX_FILE_SIZE: u64 = (4 << 30) - 1;
 
 /// Current stage of a firmware download + decrypt pipeline.
