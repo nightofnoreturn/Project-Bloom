@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use bloom_core::{
     default_device_cache_path, generate_adb_qr_session, load_galaxy_cache, ConnectedSamsungDevice,
     CscDb, CscItem, DeviceCatalog, DeviceConnectionMode, GalaxyDevice, HistoryItem, ImeiDb,
+    OdinFirmwareSlots, OdinFlashOptions,
 };
 use egui::{Frame, Id};
 use egui_twoui::prelude::*;
@@ -23,7 +24,10 @@ use state::{
     load_downloads_history, AppConfig, BloomPage, BrowseStep, DecryptForm, DeviceRightPane,
     SharedUiState, SnackAction, CONNECTED_DEVICE_PAGE_BASE, STORAGE_KEY,
 };
-use tasks::{spawn_manual_decrypt, spawn_scan_adb_devices, spawn_sync_galaxy_db};
+use tasks::{
+    spawn_manual_decrypt, spawn_odin_flash, spawn_probe_odin_device, spawn_scan_adb_devices,
+    spawn_sync_galaxy_db,
+};
 
 static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
 
@@ -221,6 +225,13 @@ pub struct BloomApp {
     pub downloads_search_open: bool,
     pub downloads_search_query: String,
 
+    // Safe Odin flasher state
+    pub flash_slots: OdinFirmwareSlots,
+    pub flash_auto_reboot: bool,
+    pub flash_verify_md5: bool,
+    pub flash_wipe_confirm_open: bool,
+    pub last_flash_probe: Instant,
+
     // Navigation & global overlays
     pub page_id: usize,
     pub drawer_open: bool,
@@ -352,6 +363,12 @@ impl BloomApp {
             settings_region_query: String::new(),
             downloads_search_open: false,
             downloads_search_query: String::new(),
+
+            flash_slots: OdinFirmwareSlots::default(),
+            flash_auto_reboot: true,
+            flash_verify_md5: true,
+            flash_wipe_confirm_open: false,
+            last_flash_probe: initial_mdns_scan,
 
             page_id: BloomPage::Browse.id(),
             drawer_open: true,
@@ -650,6 +667,11 @@ impl eframe::App for BloomApp {
             )
         });
         entries.push(DrawerEntry::item(
+            BloomPage::Flash.id(),
+            BloomPage::Flash.title(),
+            BloomPage::Flash.icon(),
+        ));
+        entries.push(DrawerEntry::item(
             BloomPage::Decrypt.id(),
             BloomPage::Decrypt.title(),
             BloomPage::Decrypt.icon(),
@@ -702,6 +724,11 @@ impl eframe::App for BloomApp {
                 (current_page.title().to_owned(), None)
             };
 
+        let is_flash_page = active_connected_idx.is_none() && current_page == BloomPage::Flash;
+        if is_flash_page && !is_busy && self.last_flash_probe.elapsed() >= Duration::from_secs(3) {
+            self.last_flash_probe = Instant::now();
+            spawn_probe_odin_device(&self.rt, Arc::clone(&self.shared), ui.ctx().clone());
+        }
         let is_downloads_page = active_connected_idx.is_none() && current_page == BloomPage::Downloads;
         let is_decrypt_page = active_connected_idx.is_none() && current_page == BloomPage::Decrypt;
         let is_browse_page = active_connected_idx.is_none() && current_page == BloomPage::Browse;
@@ -754,6 +781,7 @@ impl eframe::App for BloomApp {
                                     BloomPage::About => self.render_about_page(ui),
                                     BloomPage::PairDevice => self.render_pair_device_page(ui),
                                     BloomPage::Downloads => self.render_downloads_page(ui),
+                                    BloomPage::Flash => self.render_flash_page(ui),
                                 }
                             }
                             ui.add_space(28.0);
@@ -847,6 +875,28 @@ impl eframe::App for BloomApp {
                     "Reset",
                     Some("Undo"),
                     SnackAction::RestoreConfig(Box::new(prev)),
+                );
+            }
+        }
+
+        // Wipe confirmation dialog before flashing CSC (Clean install)
+        if let Some(idx) = TwoUiDialog::new("bloom_flash_wipe_dialog", "Erase all data?")
+            .body("The selected CSC package will factory reset this device and erase all user data.")
+            .action(DialogAction::cancel("Cancel"))
+            .action(DialogAction::destructive("Erase & Flash"))
+            .show(ui.ctx(), &mut self.flash_wipe_confirm_open, |_| {})
+        {
+            if idx == 1 {
+                let options = OdinFlashOptions {
+                    auto_reboot: self.flash_auto_reboot,
+                    verify_md5: self.flash_verify_md5,
+                };
+                spawn_odin_flash(
+                    &self.rt,
+                    Arc::clone(&self.shared),
+                    ui.ctx().clone(),
+                    self.flash_slots.clone(),
+                    options,
                 );
             }
         }

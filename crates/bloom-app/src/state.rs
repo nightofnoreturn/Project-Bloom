@@ -29,6 +29,7 @@ pub enum BloomPage {
     About,
     PairDevice,
     Downloads,
+    Flash,
 }
 
 impl BloomPage {
@@ -39,6 +40,7 @@ impl BloomPage {
             3 => Self::About,
             4 => Self::PairDevice,
             5 => Self::Downloads,
+            6 => Self::Flash,
             _ => Self::Browse,
         }
     }
@@ -51,6 +53,7 @@ impl BloomPage {
             Self::About => 3,
             Self::PairDevice => 4,
             Self::Downloads => 5,
+            Self::Flash => 6,
         }
     }
 
@@ -63,6 +66,7 @@ impl BloomPage {
             Self::About => "About",
             Self::PairDevice => "Pair Device",
             Self::Downloads => "Downloads",
+            Self::Flash => "Flash",
         }
     }
 
@@ -74,6 +78,7 @@ impl BloomPage {
             Self::About => TwoUiIcon::InfoOutline,
             Self::PairDevice => TwoUiIcon::QrCode,
             Self::Downloads => TwoUiIcon::Download,
+            Self::Flash => TwoUiIcon::LightningOutline,
         }
     }
 }
@@ -287,6 +292,22 @@ impl ActiveDownloadJob {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct FlashUiState {
+    pub probing: bool,
+    pub device_connected: bool,
+    pub device_info: Option<bloom_core::OdinDeviceSnapshot>,
+    pub rebooting_to_dl: bool,
+    pub flashing: bool,
+    pub stage: bloom_core::OdinFlashStage,
+    pub current_partition: Option<String>,
+    pub current_bytes: u64,
+    pub total_bytes: u64,
+    pub logs: Vec<String>,
+    pub last_error: Option<String>,
+    pub completed_ok: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct SharedUiState {
     pub decrypting: bool,
@@ -310,6 +331,7 @@ pub struct SharedUiState {
     pub completed_downloads: Vec<DownloadJobRecord>,
     pub newly_completed_count: usize,
     pub last_completed_output: Option<PathBuf>,
+    pub flash: FlashUiState,
     pub error_message: Option<String>,
     pub pending_toast: Option<String>,
     pub pending_snack: Option<(String, Option<&'static str>, SnackAction)>,
@@ -317,7 +339,7 @@ pub struct SharedUiState {
 
 impl SharedUiState {
     pub fn is_busy(&self) -> bool {
-        self.decrypting || self.my_device_builds_loading
+        self.decrypting || self.my_device_builds_loading || self.flash.flashing
     }
 }
 

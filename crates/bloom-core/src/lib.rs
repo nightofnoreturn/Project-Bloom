@@ -6,6 +6,7 @@ pub mod downloader;
 pub mod error;
 pub mod fus;
 pub mod history;
+pub mod odin;
 pub mod planner;
 pub mod renders;
 pub mod wpd;
@@ -40,6 +41,13 @@ pub use history::{
     extract_one_ui_version_from_notes, fallback_csc_for_model, fetch_firmware_history,
     has_newer_build_in_history, is_build_newer, propagate_one_ui_versions, Changelog,
     ChangelogLang, DecodedBuildCode, FirmwareUpdateType, HistoryItem, HistoryResult,
+};
+pub use odin::{
+    default_odin_backend, execute_safe_flash, extract_binary_from_build,
+    extract_model_and_binary_from_slots, probe_odin_device, reboot_connected_to_download_mode,
+    validate_odin_preflight, DownloadModeReboot, OdinCscMode, OdinDeviceSnapshot,
+    OdinFirmwareSlots, OdinFlashOptions, OdinFlashStage, OdinProgressEvent, OdinSafetyIssue,
+    OdinSlotKind,
 };
 pub use planner::{
     ClaimResult, SegmentAssignment, SegmentPlanner, SegmentProgress, SegmentState,

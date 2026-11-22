@@ -6,11 +6,13 @@ use bloom_core::crypto::{decrypt_file_parallel, get_v2_key, key_from_string};
 use bloom_core::{
     adb_connect_wireless, adb_pair_and_connect_wireless, clear_render_index_cache,
     default_device_cache_path, default_render_cache_dir, delete_galaxy_cache,
-    derive_output_filenames, download_and_decrypt, fetch_and_cache_galaxy_devices,
-    fetch_firmware_history, fetch_or_load_device_render_png, has_newer_build_in_history,
-    list_adb_mdns_services, render_cache_key, resolve_binary_with_fallback,
+    derive_output_filenames, download_and_decrypt, execute_safe_flash,
+    fetch_and_cache_galaxy_devices, fetch_firmware_history, fetch_or_load_device_render_png,
+    has_newer_build_in_history, list_adb_mdns_services, probe_odin_device,
+    reboot_connected_to_download_mode, render_cache_key, resolve_binary_with_fallback,
     scan_connected_samsung_devices, BloomError, ChangelogLang, ConnectedSamsungDevice,
-    DeviceCatalog, DownloadHandle, DownloadOptions, ImeiDb, JobStage,
+    DeviceCatalog, DownloadHandle, DownloadOptions, ImeiDb, JobStage, OdinFirmwareSlots,
+    OdinFlashOptions, OdinFlashStage, OdinProgressEvent,
 };
 
 use crate::state::{
@@ -882,6 +884,180 @@ pub fn spawn_firmware_download(
                             w.status = "Disconnected".to_owned();
                         }
                     }
+                }
+            }
+        }
+        ctx.request_repaint();
+    });
+}
+
+pub fn spawn_probe_odin_device(
+    rt: &tokio::runtime::Runtime,
+    shared: Arc<Mutex<SharedUiState>>,
+    ctx: egui::Context,
+) {
+    if let Ok(mut guard) = shared.lock() {
+        if guard.flash.probing || guard.flash.flashing {
+            return;
+        }
+        guard.flash.probing = true;
+    }
+
+    rt.spawn(async move {
+        let res = probe_odin_device().await;
+        if let Ok(mut guard) = shared.lock() {
+            guard.flash.probing = false;
+            match res {
+                Ok(Some(snap)) => {
+                    guard.flash.device_connected = true;
+                    guard.flash.device_info = Some(snap);
+                }
+                Ok(None) | Err(_) => {
+                    guard.flash.device_connected = false;
+                    guard.flash.device_info = None;
+                }
+            }
+        }
+        ctx.request_repaint();
+    });
+}
+
+pub fn spawn_reboot_to_download_mode(
+    rt: &tokio::runtime::Runtime,
+    shared: Arc<Mutex<SharedUiState>>,
+    ctx: egui::Context,
+) {
+    if let Ok(mut guard) = shared.lock() {
+        if guard.flash.rebooting_to_dl || guard.flash.flashing {
+            return;
+        }
+        guard.flash.rebooting_to_dl = true;
+        guard.flash.last_error = None;
+    }
+    ctx.request_repaint();
+
+    rt.spawn(async move {
+        let res = reboot_connected_to_download_mode().await;
+        match res {
+            Ok(outcome) => {
+                if let Ok(mut guard) = shared.lock() {
+                    let msg = match outcome {
+                        bloom_core::odin::DownloadModeReboot::AlreadyInDownloadMode => {
+                            "Device is already in Download Mode."
+                        }
+                        bloom_core::odin::DownloadModeReboot::Sent => {
+                            "Reboot command sent. Waiting for Download Mode..."
+                        }
+                    };
+                    guard.flash.logs.push(msg.to_owned());
+                }
+                ctx.request_repaint();
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                if let Ok(Some(snap)) = probe_odin_device().await {
+                    if let Ok(mut guard) = shared.lock() {
+                        guard.flash.device_connected = true;
+                        guard.flash.device_info = Some(snap);
+                    }
+                }
+            }
+            Err(err) => {
+                if let Ok(mut guard) = shared.lock() {
+                    let msg = err.to_string();
+                    guard.flash.last_error = Some(msg.clone());
+                    guard.flash.logs.push(msg);
+                }
+            }
+        }
+        if let Ok(mut guard) = shared.lock() {
+            guard.flash.rebooting_to_dl = false;
+        }
+        ctx.request_repaint();
+    });
+}
+
+pub fn spawn_odin_flash(
+    rt: &tokio::runtime::Runtime,
+    shared: Arc<Mutex<SharedUiState>>,
+    ctx: egui::Context,
+    slots: OdinFirmwareSlots,
+    options: OdinFlashOptions,
+) {
+    if let Ok(mut guard) = shared.lock() {
+        if guard.flash.flashing {
+            return;
+        }
+        guard.flash.flashing = true;
+        guard.flash.stage = OdinFlashStage::Preparing;
+        guard.flash.current_partition = None;
+        guard.flash.current_bytes = 0;
+        guard.flash.total_bytes = 0;
+        guard.flash.logs.clear();
+        guard.flash.last_error = None;
+        guard.flash.completed_ok = false;
+    }
+    ctx.request_repaint();
+
+    rt.spawn(async move {
+        let ev_shared = Arc::clone(&shared);
+        let ev_ctx = ctx.clone();
+
+        let result = execute_safe_flash(slots, options, move |ev| {
+            if let Ok(mut guard) = ev_shared.lock() {
+                match ev {
+                    OdinProgressEvent::Stage(st) => {
+                        guard.flash.stage = st;
+                    }
+                    OdinProgressEvent::Log(msg) => {
+                        if guard.flash.logs.len() >= 250 {
+                            guard.flash.logs.remove(0);
+                        }
+                        guard.flash.logs.push(msg);
+                    }
+                    OdinProgressEvent::DeviceInfo(snap) => {
+                        guard.flash.device_connected = true;
+                        guard.flash.device_info = Some(snap);
+                    }
+                    OdinProgressEvent::FlashTotal { total_bytes, .. } => {
+                        guard.flash.total_bytes = total_bytes;
+                        guard.flash.current_bytes = 0;
+                    }
+                    OdinProgressEvent::PartitionStart { name, .. } => {
+                        guard.flash.current_partition = Some(name);
+                    }
+                    OdinProgressEvent::PartitionDone(_) => {}
+                    OdinProgressEvent::Md5Start { name, size } => {
+                        guard.flash.current_partition = Some(format!("MD5 · {name}"));
+                        guard.flash.current_bytes = 0;
+                        guard.flash.total_bytes = size;
+                    }
+                    OdinProgressEvent::Md5Done(_) => {
+                        guard.flash.current_partition = None;
+                    }
+                    OdinProgressEvent::BytesProgress { current, total } => {
+                        guard.flash.current_bytes = current;
+                        guard.flash.total_bytes = total;
+                    }
+                }
+            }
+            ev_ctx.request_repaint();
+        })
+        .await;
+
+        if let Ok(mut guard) = shared.lock() {
+            guard.flash.flashing = false;
+            guard.flash.current_partition = None;
+            match result {
+                Ok(()) => {
+                    guard.flash.stage = OdinFlashStage::Completed;
+                    guard.flash.completed_ok = true;
+                    guard.pending_toast = Some("Flash completed".to_owned());
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    guard.flash.stage = OdinFlashStage::Failed;
+                    guard.flash.completed_ok = false;
+                    guard.flash.last_error = Some(msg.clone());
+                    guard.flash.logs.push(format!("Error: {msg}"));
                 }
             }
         }

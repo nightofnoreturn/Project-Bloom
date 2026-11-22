@@ -60,6 +60,9 @@ pub enum BloomError {
 
     #[error("Operation canceled by user")]
     Canceled,
+
+    #[error("Odin flash error: {0}")]
+    Odin(String),
 }
 
 pub type Result<T> = std::result::Result<T, BloomError>;
