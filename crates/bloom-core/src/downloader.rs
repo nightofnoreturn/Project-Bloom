@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_LENGTH, RANGE};
-use reqwest::StatusCode;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify, RwLock};
@@ -15,9 +15,16 @@ use crate::crypto::{decrypt_file_parallel, get_v2_key, verify_file_single_pass};
 use crate::data::BinaryFileInfo;
 use crate::error::{BloomError, Result};
 use crate::fus::{FusClient, PreparedDownload};
+pub use crate::planner::{
+    ClaimResult, SegmentAssignment, SegmentPlanner, SegmentProgress, SegmentState,
+    DEFAULT_MIN_SPLIT,
+};
 
 const STATE_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SEGMENT_RETRIES: usize = 60;
+const DISK_SPACE_MARGIN: u64 = 128 * 1024 * 1024;
+const FAT32_MAX_FILE_SIZE: u64 = (4 << 30) - 1;
 
 /// Current stage of a firmware download + decrypt pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +44,7 @@ pub struct ProgressSnapshot {
     pub total_bytes: u64,
     pub bytes_per_sec: u64,
     pub active_connections: usize,
+    pub segments: Vec<SegmentProgress>,
 }
 
 /// Configuration options for downloading & decrypting a firmware package.
@@ -122,30 +130,6 @@ fn retry_backoff(retries: usize) -> Duration {
     Duration::from_secs((1u64 << retries.min(5)).min(30))
 }
 
-/// Persisted segment state inside `.bloom-state.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SegmentState {
-    pub id: usize,
-    pub start: u64,
-    /// Inclusive end byte offset.
-    pub end: u64,
-    pub downloaded: u64,
-}
-
-impl SegmentState {
-    pub fn total_len(&self) -> u64 {
-        self.end - self.start + 1
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.downloaded >= self.total_len()
-    }
-
-    pub fn next_offset(&self) -> u64 {
-        self.start + self.downloaded
-    }
-}
-
 /// On-disk checkpoint metadata allowing crash-proof and disconnect-proof resume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadStateFile {
@@ -216,16 +200,26 @@ impl TokenBucket {
     }
 }
 
+struct ActiveConnGuard<'a>(&'a AtomicUsize);
+
+impl Drop for ActiveConnGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 struct SharedState {
     info: BinaryFileInfo,
     region: String,
-    enc_path: PathBuf,
+    part_path: PathBuf,
     state_path: PathBuf,
+    supports_range: bool,
     fus: Mutex<FusClient>,
     prepared: RwLock<PreparedDownload>,
     auth_epoch: AtomicU64,
     auth_refresh_lock: Mutex<()>,
-    state_file: Mutex<DownloadStateFile>,
+    planner: Mutex<SegmentPlanner>,
+    state_meta: DownloadStateFile,
     downloaded_bytes: AtomicU64,
     active_connections: AtomicUsize,
     handle: DownloadHandle,
@@ -233,11 +227,18 @@ struct SharedState {
 }
 
 impl SharedState {
+    async fn snapshot_progress(&self) -> (u64, Vec<SegmentProgress>) {
+        let guard = self.planner.lock().await;
+        (guard.downloaded_bytes(), guard.snapshot())
+    }
+
     async fn persist_state(&self) -> Result<()> {
-        let snapshot = {
-            let guard = self.state_file.lock().await;
-            guard.clone()
+        let segments = {
+            let guard = self.planner.lock().await;
+            guard.to_saved()
         };
+        let mut snapshot = self.state_meta.clone();
+        snapshot.segments = segments;
         write_state_atomic(&self.state_path, &snapshot).await
     }
 
@@ -258,6 +259,179 @@ impl SharedState {
         self.auth_epoch.store(next_epoch, Ordering::SeqCst);
         Ok((next_epoch, new_prep))
     }
+}
+
+#[cfg(windows)]
+mod disk_win {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            lpDirectoryName: *const u16,
+            lpFreeBytesAvailableToCaller: *mut u64,
+            lpTotalNumberOfBytes: *mut u64,
+            lpTotalNumberOfFreeBytes: *mut u64,
+        ) -> i32;
+        fn GetVolumeInformationByHandleW(
+            hFile: *mut c_void,
+            lpVolumeNameBuffer: *mut u16,
+            nVolumeNameSize: u32,
+            lpVolumeSerialNumber: *mut u32,
+            lpMaximumComponentLength: *mut u32,
+            lpFileSystemFlags: *mut u32,
+            lpFileSystemNameBuffer: *mut u16,
+            nFileSystemNameSize: u32,
+        ) -> i32;
+        fn DeviceIoControl(
+            hDevice: *mut c_void,
+            dwIoControlCode: u32,
+            lpInBuffer: *const c_void,
+            nInBufferSize: u32,
+            lpOutBuffer: *mut c_void,
+            nOutBufferSize: u32,
+            lpBytesReturned: *mut u32,
+            lpOverlapped: *mut c_void,
+        ) -> i32;
+    }
+
+    pub fn free_bytes_available(dir: &Path) -> Option<u64> {
+        let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+        if !matches!(wide.last(), Some(&c) if c == u16::from(b'\\') || c == u16::from(b'/')) {
+            wide.push(u16::from(b'\\'));
+        }
+        wide.push(0);
+
+        let mut free: u64 = 0;
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        (ok != 0).then_some(free)
+    }
+
+    pub fn volume_filesystem(dir: &Path) -> Option<String> {
+        let handle = std::fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+            .ok()?;
+
+        let mut fs_name = [0u16; 261];
+        let ok = unsafe {
+            GetVolumeInformationByHandleW(
+                handle.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                fs_name.as_mut_ptr(),
+                fs_name.len() as u32,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let len = fs_name
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(fs_name.len());
+        Some(String::from_utf16_lossy(&fs_name[..len]))
+    }
+
+    pub fn try_mark_sparse(file: &std::fs::File) {
+        let mut returned: u32 = 0;
+        let _ = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_SET_SPARSE,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+    }
+}
+
+/// Checks destination volume capacity and FAT32 4 GiB limit before allocating disk space.
+pub fn check_disk_space(dir: &Path, total_size: u64, remaining_bytes: u64) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if let Some(fs_name) = disk_win::volume_filesystem(dir) {
+            if fs_name.eq_ignore_ascii_case("FAT32") && total_size > FAT32_MAX_FILE_SIZE {
+                return Err(BloomError::Io(std::io::Error::other(
+                    "FAT32 volumes cannot store firmware files larger than 4 GiB",
+                )));
+            }
+        }
+        if let Some(free) = disk_win::free_bytes_available(dir) {
+            let needed = remaining_bytes.saturating_add(DISK_SPACE_MARGIN);
+            if free < needed {
+                return Err(BloomError::Io(std::io::Error::other(format!(
+                    "Insufficient disk space in {} (need {} MiB free)",
+                    dir.display(),
+                    needed / (1024 * 1024)
+                ))));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (dir, total_size, remaining_bytes);
+    }
+    Ok(())
+}
+
+/// Creates or resizes the backing `<enc_path>.part` file, enabling sparse allocation on NTFS
+/// so multi-gigabyte firmware files initialize without blocking zero-fill.
+pub async fn prepare_part_file(part_path: &Path, total_size: u64) -> Result<()> {
+    let path = part_path.to_path_buf();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+
+        #[cfg(windows)]
+        disk_win::try_mark_sparse(&file);
+
+        let cur_len = file.metadata()?.len();
+        if cur_len != total_size {
+            file.set_len(total_size)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| BloomError::Io(std::io::Error::other(format!("part init task failed: {e}"))))??;
+    Ok(())
+}
+
+/// Build a dedicated HTTP/1.1 keep-alive client so each worker maintains one TCP connection
+/// reused across dynamically assigned segments.
+fn build_worker_http_client() -> Result<Client> {
+    Ok(Client::builder()
+        .http1_only()
+        .connect_timeout(Duration::from_secs(20))
+        .tcp_keepalive(Duration::from_secs(30))
+        .pool_max_idle_per_host(1)
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()?)
 }
 
 /// Build the local encrypted and decrypted filenames matching Samsung/Bifrost convention.
@@ -325,6 +499,12 @@ pub fn build_segments(total_size: u64, connections: usize) -> Vec<SegmentState> 
     segments
 }
 
+pub fn part_path_for(enc_path: &Path) -> PathBuf {
+    let mut os = enc_path.as_os_str().to_os_string();
+    os.push(".part");
+    PathBuf::from(os)
+}
+
 fn state_path_for(enc_path: &Path) -> PathBuf {
     let mut os = enc_path.as_os_str().to_os_string();
     os.push(".bloom-state.json");
@@ -347,8 +527,10 @@ async fn write_state_atomic(state_path: &Path, state: &DownloadStateFile) -> Res
 
 /// Download, optionally verify (single-pass CRC32 + MD5), and decrypt a Samsung firmware file.
 ///
-/// Resumes seamlessly from `<encrypted_file>.bloom-state.json` if a previous attempt was
-/// paused, interrupted by a network outage, or hit an expired Samsung session token (`401`).
+/// Uses dynamic work-stealing segmentation (4 KiB-aligned), dedicated HTTP/1.1 per-worker
+/// connections, disk space / FAT32 preflight, sparse `.part` staging, and crash-safe
+/// `<encrypted_file>.bloom-state.json` resume checkpoints with automatic FUS `401`/`403` token
+/// refresh.
 pub async fn download_and_decrypt<F>(
     mut fus: FusClient,
     info: BinaryFileInfo,
@@ -366,6 +548,7 @@ where
 
     let (enc_name, dec_name) = derive_output_filenames(&info.file_name, fw, region);
     let enc_path = options.output_dir.join(&enc_name);
+    let part_path = part_path_for(&enc_path);
     let dec_path = options.output_dir.join(&dec_name);
     let state_path = state_path_for(&enc_path);
 
@@ -375,6 +558,7 @@ where
         total_bytes: info.size,
         bytes_per_sec: 0,
         active_connections: 0,
+        segments: Vec::new(),
     });
 
     let mut prepared = fus.prepare_download(&info, region, false).await?;
@@ -413,8 +597,9 @@ where
             .and_then(|v| v.to_str().ok())
             .is_some();
 
-    let mut state_file = load_or_init_state(
+    let (mut state_file, planner) = load_or_init_state(
         &enc_path,
+        &part_path,
         &state_path,
         &info,
         model,
@@ -427,33 +612,31 @@ where
     )
     .await?;
 
-    // Ensure the underlying file exists and is pre-sized to `info.size`.
-    {
-        let file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&enc_path)
-            .await?;
-        let current_len = file.metadata().await?.len();
-        if current_len != info.size {
-            file.set_len(info.size).await?;
-        }
-    }
+    let resumed_from_bytes = planner.downloaded_bytes();
+    let remaining_bytes = info.size.saturating_sub(resumed_from_bytes);
 
-    let resumed_from_bytes: u64 = state_file.segments.iter().map(|s| s.downloaded).sum();
+    if state_file.stage == JobStage::Downloading && !planner.is_complete() {
+        check_disk_space(&options.output_dir, info.size, remaining_bytes)?;
+        prepare_part_file(&part_path, info.size).await?;
 
-    if state_file.stage == JobStage::Downloading && !state_file.segments.iter().all(SegmentState::is_complete) {
+        let worker_count = if supports_range && info.size >= DEFAULT_MIN_SPLIT {
+            options.connections.clamp(1, 32)
+        } else {
+            1
+        };
+
         let shared = Arc::new(SharedState {
             info: info.clone(),
             region: region.to_owned(),
-            enc_path: enc_path.clone(),
+            part_path: part_path.clone(),
             state_path: state_path.clone(),
+            supports_range,
             fus: Mutex::new(fus),
             prepared: RwLock::new(prepared),
             auth_epoch: AtomicU64::new(0),
             auth_refresh_lock: Mutex::new(()),
-            state_file: Mutex::new(state_file.clone()),
+            planner: Mutex::new(planner),
+            state_meta: state_file.clone(),
             downloaded_bytes: AtomicU64::new(resumed_from_bytes),
             active_connections: AtomicUsize::new(0),
             handle: handle.clone(),
@@ -482,8 +665,9 @@ where
             let mut last_tick = Instant::now();
             while !progress_done_clone.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_millis(250)).await;
+                let (committed_bytes, segments) = progress_shared.snapshot_progress().await;
+                let cur = committed_bytes.min(total_size);
                 let now = Instant::now();
-                let cur = progress_shared.downloaded_bytes.load(Ordering::Relaxed);
                 let elapsed = now.duration_since(last_tick).as_secs_f64();
                 let bps = if elapsed > 0.0 {
                     ((cur.saturating_sub(last_bytes)) as f64 / elapsed) as u64
@@ -494,21 +678,19 @@ where
                 last_tick = now;
                 let _ = prog_tx.send(ProgressSnapshot {
                     stage: JobStage::Downloading,
-                    current_bytes: cur.min(total_size),
+                    current_bytes: cur,
                     total_bytes: total_size,
                     bytes_per_sec: bps,
                     active_connections: progress_shared.active_connections.load(Ordering::Relaxed),
+                    segments,
                 });
             }
         });
 
         let mut join_set = tokio::task::JoinSet::new();
-        for seg_idx in 0..state_file.segments.len() {
-            if state_file.segments[seg_idx].is_complete() {
-                continue;
-            }
+        for worker_id in 0..worker_count {
             let worker_shared = Arc::clone(&shared);
-            join_set.spawn(async move { run_segment_worker(worker_shared, seg_idx).await });
+            join_set.spawn(async move { run_dynamic_worker(worker_shared, worker_id as u32).await });
         }
 
         let mut first_error: Option<BloomError> = None;
@@ -546,7 +728,10 @@ where
         }
 
         let _ = shared.persist_state().await;
-        state_file = shared.state_file.lock().await.clone();
+        {
+            let guard = shared.planner.lock().await;
+            state_file.segments = guard.to_saved();
+        }
 
         if handle.is_canceled() {
             return Err(BloomError::Canceled);
@@ -557,6 +742,16 @@ where
         if handle.is_paused() {
             return Err(BloomError::Paused);
         }
+
+        // All worker file handles have dropped; promote `.part` to the encrypted target atomically.
+        if tokio::fs::try_exists(&enc_path).await.unwrap_or(false) {
+            let _ = tokio::fs::remove_file(&enc_path).await;
+        }
+        tokio::fs::rename(&part_path, &enc_path).await?;
+    } else if !tokio::fs::try_exists(&enc_path).await.unwrap_or(false)
+        && tokio::fs::try_exists(&part_path).await.unwrap_or(false)
+    {
+        tokio::fs::rename(&part_path, &enc_path).await?;
     }
 
     if options.verify_checksums
@@ -592,6 +787,7 @@ where
                 total_bytes: max,
                 bytes_per_sec: 0,
                 active_connections: 0,
+                segments: Vec::new(),
             });
         }
 
@@ -645,6 +841,7 @@ where
                 total_bytes: max,
                 bytes_per_sec: bps,
                 active_connections: 0,
+                segments: Vec::new(),
             });
         }
 
@@ -668,6 +865,7 @@ where
         total_bytes: info.size,
         bytes_per_sec: 0,
         active_connections: 0,
+        segments: Vec::new(),
     });
 
     Ok(DownloadOutcome {
@@ -681,6 +879,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn load_or_init_state(
     enc_path: &Path,
+    part_path: &Path,
     state_path: &Path,
     info: &BinaryFileInfo,
     model: &str,
@@ -690,38 +889,55 @@ async fn load_or_init_state(
     content_md5: Option<String>,
     supports_range: bool,
     connections: usize,
-) -> Result<DownloadStateFile> {
-    if tokio::fs::try_exists(state_path).await.unwrap_or(false)
-        && tokio::fs::try_exists(enc_path).await.unwrap_or(false)
-    {
-        if let Ok(raw) = tokio::fs::read(state_path).await {
-            if let Ok(mut existing) = serde_json::from_slice::<DownloadStateFile>(&raw) {
-                if existing.total_size == info.size && existing.remote_file_name == info.file_name {
-                    let disk_len = tokio::fs::metadata(enc_path)
-                        .await
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    // Clamp segment progress if file on disk was truncated
-                    for seg in &mut existing.segments {
-                        if seg.start + seg.downloaded > disk_len {
-                            seg.downloaded = disk_len.saturating_sub(seg.start);
+) -> Result<(DownloadStateFile, SegmentPlanner)> {
+    if tokio::fs::try_exists(state_path).await.unwrap_or(false) {
+        let part_exists = tokio::fs::try_exists(part_path).await.unwrap_or(false);
+        let enc_exists = tokio::fs::try_exists(enc_path).await.unwrap_or(false);
+        if part_exists || enc_exists {
+            if let Ok(raw) = tokio::fs::read(state_path).await {
+                if let Ok(mut existing) = serde_json::from_slice::<DownloadStateFile>(&raw) {
+                    if existing.total_size == info.size
+                        && existing.remote_file_name == info.file_name
+                    {
+                        if !part_exists && enc_exists && existing.stage == JobStage::Downloading {
+                            let _ = tokio::fs::rename(enc_path, part_path).await;
+                        }
+
+                        let active_backing = if tokio::fs::try_exists(part_path).await.unwrap_or(false)
+                        {
+                            part_path
+                        } else {
+                            enc_path
+                        };
+
+                        let disk_len = tokio::fs::metadata(active_backing)
+                            .await
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+
+                        for seg in &mut existing.segments {
+                            if seg.start + seg.downloaded > disk_len {
+                                seg.downloaded = disk_len.saturating_sub(seg.start);
+                            }
+                        }
+                        if existing.content_md5.is_none() {
+                            existing.content_md5 = content_md5.clone();
+                        }
+
+                        if let Some(planner) =
+                            SegmentPlanner::from_saved(info.size, DEFAULT_MIN_SPLIT, &existing.segments)
+                        {
+                            existing.segments = planner.to_saved();
+                            return Ok((existing, planner));
                         }
                     }
-                    if existing.content_md5.is_none() {
-                        existing.content_md5 = content_md5;
-                    }
-                    return Ok(existing);
                 }
             }
         }
     }
 
-    let effective_connections = if supports_range && info.size >= 2 * 1024 * 1024 {
-        connections
-    } else {
-        1
-    };
-
+    let _ = connections;
+    let planner = SegmentPlanner::new(info.size, DEFAULT_MIN_SPLIT);
     let state = DownloadStateFile {
         model: model.to_owned(),
         region: region.to_owned(),
@@ -735,51 +951,74 @@ async fn load_or_init_state(
         v4_key_str: info.v4_key.as_ref().map(|(_, s)| s.clone()),
         supports_range,
         stage: JobStage::Downloading,
-        segments: build_segments(info.size, effective_connections),
+        segments: planner.to_saved(),
     };
 
     write_state_atomic(state_path, &state).await?;
-    Ok(state)
+    Ok((state, planner))
 }
 
-async fn run_segment_worker(shared: Arc<SharedState>, seg_idx: usize) -> Result<()> {
+async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<()> {
+    let client = build_worker_http_client()?;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&shared.part_path)
+        .await?;
     let mut retries = 0usize;
 
     loop {
         if shared.handle.should_stop() {
+            let _ = file.flush().await;
             return Ok(());
         }
 
-        let (cur_offset, end_offset, supports_range) = {
-            let guard = shared.state_file.lock().await;
-            let seg = &guard.segments[seg_idx];
-            if seg.is_complete() {
+        let assignment = {
+            let mut guard = shared.planner.lock().await;
+            if guard.is_complete() {
+                drop(guard);
+                let _ = file.flush().await;
                 return Ok(());
             }
-            (seg.next_offset(), seg.end, guard.supports_range)
+            guard.assign(worker_id, Instant::now())
+        };
+
+        let Some(mut assign) = assignment else {
+            shared
+                .handle
+                .sleep_interruptible(Duration::from_millis(250))
+                .await;
+            continue;
         };
 
         let seen_epoch = shared.auth_epoch.load(Ordering::SeqCst);
         let prepared = shared.prepared.read().await.clone();
-        let http = {
-            let fus = shared.fus.lock().await;
-            fus.http().clone()
-        };
-
         let mut headers = FusClient::cdn_headers(&prepared)?;
-        if supports_range {
-            let range_val = format!("bytes={cur_offset}-{end_offset}");
+        if shared.supports_range {
+            let end_inclusive = assign.to.saturating_sub(1);
+            let range_val = format!("bytes={}-{end_inclusive}", assign.from);
             headers.insert(
                 RANGE,
                 range_val
                     .parse()
                     .map_err(|e| BloomError::Crypto(format!("invalid range header: {e}")))?,
             );
+        } else if assign.from > 0 {
+            // Non-range servers only serve from byte 0; restart single assignment cleanly.
+            let mut guard = shared.planner.lock().await;
+            *guard = SegmentPlanner::new(shared.info.size, DEFAULT_MIN_SPLIT);
+            assign = guard
+                .assign(worker_id, Instant::now())
+                .unwrap_or(SegmentAssignment {
+                    from: 0,
+                    to: shared.info.size,
+                });
+            shared.downloaded_bytes.store(0, Ordering::Relaxed);
         }
 
-        let response = match http.get(&prepared.url).headers(headers).send().await {
+        let response = match client.get(&prepared.url).headers(headers).send().await {
             Ok(resp) => resp,
             Err(err) => {
+                shared.planner.lock().await.release(worker_id);
                 if retries >= MAX_SEGMENT_RETRIES {
                     return Err(BloomError::Http(err));
                 }
@@ -794,6 +1033,7 @@ async fn run_segment_worker(shared: Arc<SharedState>, seg_idx: usize) -> Result<
 
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            shared.planner.lock().await.release(worker_id);
             if retries >= MAX_SEGMENT_RETRIES {
                 return Err(BloomError::Unauthorized);
             }
@@ -803,6 +1043,7 @@ async fn run_segment_worker(shared: Arc<SharedState>, seg_idx: usize) -> Result<
         }
 
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            shared.planner.lock().await.release(worker_id);
             if retries >= MAX_SEGMENT_RETRIES {
                 return Err(BloomError::HttpStatus {
                     status: status.as_u16(),
@@ -817,31 +1058,40 @@ async fn run_segment_worker(shared: Arc<SharedState>, seg_idx: usize) -> Result<
             continue;
         }
 
-        if !(status == StatusCode::PARTIAL_CONTENT || (status == StatusCode::OK && cur_offset == 0))
+        if !(status == StatusCode::PARTIAL_CONTENT || (status == StatusCode::OK && assign.from == 0))
         {
+            shared.planner.lock().await.release(worker_id);
             return Err(BloomError::HttpStatus {
                 status: status.as_u16(),
-                body: format!("unexpected CDN status {status} for offset {cur_offset}"),
+                body: format!("unexpected CDN status {status} for offset {}", assign.from),
             });
         }
 
-        // Own a dedicated File handle for this segment so concurrent workers never race on file offset.
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&shared.enc_path)
-            .await?;
-        file.seek(SeekFrom::Start(cur_offset)).await?;
+        file.seek(SeekFrom::Start(assign.from)).await?;
+        let mut offset = assign.from;
 
         shared.active_connections.fetch_add(1, Ordering::Relaxed);
+        let conn_guard = ActiveConnGuard(&shared.active_connections);
         let mut stream = response.bytes_stream();
-        let expected_remaining = end_offset - cur_offset + 1;
-        let mut written_this_attempt = 0u64;
         let mut stream_err: Option<BloomError> = None;
 
-        while let Some(next_chunk) = stream.next().await {
+        loop {
             if shared.handle.should_stop() {
                 break;
             }
+
+            let next_chunk =
+                match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                    Ok(Some(res)) => res,
+                    Ok(None) => break,
+                    Err(_) => {
+                        stream_err = Some(BloomError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "CDN stream stalled",
+                        )));
+                        break;
+                    }
+                };
 
             let chunk = match next_chunk {
                 Ok(c) => c,
@@ -850,36 +1100,42 @@ async fn run_segment_worker(shared: Arc<SharedState>, seg_idx: usize) -> Result<
                     break;
                 }
             };
-
-            let allow_len = (expected_remaining - written_this_attempt).min(chunk.len() as u64) as usize;
-            if allow_len == 0 {
-                break;
-            }
-            let slice = &chunk[..allow_len];
-
-            if let Some(ref limiter) = shared.limiter {
-                limiter.acquire(slice.len()).await;
+            if chunk.is_empty() {
+                continue;
             }
 
-            file.write_all(slice).await?;
-            written_this_attempt += slice.len() as u64;
-            retries = 0; // Reset retry budget whenever forward progress is made!
+            let wanted = chunk.len() as u64;
+            let claim = shared
+                .planner
+                .lock()
+                .await
+                .claim(worker_id, offset, wanted, Instant::now());
 
-            {
-                let mut guard = shared.state_file.lock().await;
-                guard.segments[seg_idx].downloaded += slice.len() as u64;
-            }
-            shared
-                .downloaded_bytes
-                .fetch_add(slice.len() as u64, Ordering::Relaxed);
+            match claim {
+                ClaimResult::Granted(granted) => {
+                    let n = granted as usize;
+                    let slice = &chunk[..n];
+                    if let Some(ref limiter) = shared.limiter {
+                        limiter.acquire(slice.len()).await;
+                    }
+                    file.write_all(slice).await?;
+                    shared.planner.lock().await.commit(worker_id, offset, granted);
+                    shared.downloaded_bytes.fetch_add(granted, Ordering::Relaxed);
+                    offset += granted;
+                    retries = 0;
 
-            if written_this_attempt >= expected_remaining {
-                break;
+                    if n < chunk.len() {
+                        // Reached dynamically shrunken boundary; drop extra tail cleanly and fetch next job.
+                        break;
+                    }
+                }
+                ClaimResult::Finished | ClaimResult::Lost => break,
             }
         }
 
+        drop(conn_guard);
         let _ = file.flush().await;
-        shared.active_connections.fetch_sub(1, Ordering::Relaxed);
+        shared.planner.lock().await.release(worker_id);
 
         if shared.handle.should_stop() {
             return Ok(());
@@ -894,30 +1150,7 @@ async fn run_segment_worker(shared: Arc<SharedState>, seg_idx: usize) -> Result<
                 .handle
                 .sleep_interruptible(retry_backoff(retries))
                 .await;
-            continue;
         }
-
-        // Check if segment finished cleanly
-        let done = {
-            let guard = shared.state_file.lock().await;
-            guard.segments[seg_idx].is_complete()
-        };
-        if done {
-            return Ok(());
-        }
-
-        // Server closed stream early without HTTP error — retry from updated offset
-        if retries >= MAX_SEGMENT_RETRIES {
-            return Err(BloomError::HttpStatus {
-                status: 0,
-                body: "CDN stream terminated prematurely".into(),
-            });
-        }
-        retries += 1;
-        shared
-            .handle
-            .sleep_interruptible(Duration::from_secs(1))
-            .await;
     }
 }
 
@@ -960,10 +1193,11 @@ mod tests {
     async fn state_file_atomic_write_and_resume_clamping() {
         let dir = tempdir().unwrap();
         let enc_path = dir.path().join("fw.zip.enc4");
+        let part_path = part_path_for(&enc_path);
         let state_path = state_path_for(&enc_path);
 
-        // Simulate partial file of 1500 bytes while state recorded up to 1700 bytes
-        let file = tokio::fs::File::create(&enc_path).await.unwrap();
+        // Simulate partial `.part` file of 1500 bytes while state recorded up to 1700 bytes
+        let file = tokio::fs::File::create(&part_path).await.unwrap();
         file.set_len(1500).await.unwrap();
 
         let info = BinaryFileInfo {
@@ -996,8 +1230,9 @@ mod tests {
         };
         write_state_atomic(&state_path, &state).await.unwrap();
 
-        let resumed = load_or_init_state(
+        let (resumed, planner) = load_or_init_state(
             &enc_path,
+            &part_path,
             &state_path,
             &info,
             "SM-S928B",
@@ -1012,5 +1247,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(resumed.segments[0].downloaded, 1500);
+        assert_eq!(planner.downloaded_bytes(), 1500);
+    }
+
+    #[tokio::test]
+    async fn disk_preflight_and_sparse_part_allocation_work() {
+        let dir = tempdir().unwrap();
+        check_disk_space(dir.path(), 4096, 4096).expect("temp dir should have space");
+
+        let part = dir.path().join("sample.zip.enc4.part");
+        prepare_part_file(&part, 65_536).await.unwrap();
+        let meta = tokio::fs::metadata(&part).await.unwrap();
+        assert_eq!(meta.len(), 65_536);
     }
 }

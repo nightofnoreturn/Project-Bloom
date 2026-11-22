@@ -6,6 +6,7 @@ pub mod downloader;
 pub mod error;
 pub mod fus;
 pub mod history;
+pub mod planner;
 pub mod renders;
 pub mod wpd;
 pub mod xml;
@@ -37,6 +38,9 @@ pub use history::{
     extract_one_ui_version_from_notes, fallback_csc_for_model, fetch_firmware_history,
     has_newer_build_in_history, is_build_newer, propagate_one_ui_versions, Changelog,
     ChangelogLang, DecodedBuildCode, FirmwareUpdateType, HistoryItem, HistoryResult,
+};
+pub use planner::{
+    ClaimResult, SegmentAssignment, SegmentPlanner, SegmentProgress, SegmentState,
 };
 pub use renders::{
     cached_render_png_path, clear_render_index_cache, default_render_cache_dir,

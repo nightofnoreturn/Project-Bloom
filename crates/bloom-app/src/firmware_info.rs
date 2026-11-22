@@ -43,9 +43,6 @@ fn render_software_info_box(
     bin_state: &FirmwareBinaryInfoState,
     box_h: f32,
 ) {
-    let theme = theme_from_ui(ui);
-    let p = &theme.palette;
-
     let decoded = item.decoded_build();
     let mut parts = item
         .firmware
@@ -84,14 +81,15 @@ fn render_software_info_box(
         FirmwareUpdateType::Other(ch) => ch.to_string(),
     });
 
+    let inner_h = (box_h - 16.0).max(160.0);
     CardSection::new()
-        .fill(p.surface_container)
         .inner_margin(Margin::symmetric(0, 8))
         .show(ui, |ui| {
-            ui.set_min_height(box_h);
+            ui.set_min_height(inner_h);
+            ui.set_max_height(inner_h);
             ScrollArea::vertical()
                 .id_salt("bloom_fw_info_left_scroll")
-                .max_height((box_h - 16.0).max(160.0))
+                .max_height(inner_h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width().max(120.0));
@@ -161,14 +159,15 @@ fn render_update_info_box(ui: &mut Ui, item: &HistoryItem, box_h: f32) {
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
+    let inner_h = (box_h - 28.0).max(160.0);
     CardSection::new()
-        .fill(p.surface_container)
         .inner_margin(Margin::symmetric(18, 14))
         .show(ui, |ui| {
-            ui.set_min_height(box_h);
+            ui.set_min_height(inner_h);
+            ui.set_max_height(inner_h);
             ScrollArea::vertical()
                 .id_salt("bloom_fw_info_right_scroll")
-                .max_height((box_h - 28.0).max(160.0))
+                .max_height(inner_h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width().max(120.0));
@@ -294,7 +293,7 @@ impl BloomApp {
         let box_h = (content_rect.height() - 220.0).clamp(240.0, 440.0);
 
         let frame = Frame::NONE
-            .fill(p.floating_surface)
+            .fill(p.round_and_bg)
             .corner_radius(CornerRadius::same(dimens::DIALOG_CORNER_RADIUS))
             .stroke(Stroke::new(0.8, p.floating_stroke))
             .shadow(elevation_shadow(ElevationTier::Lg, dark))
