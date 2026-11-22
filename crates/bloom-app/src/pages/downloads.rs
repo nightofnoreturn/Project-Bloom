@@ -187,33 +187,19 @@ impl BloomApp {
                 ui.add_space(16.0);
             }
         } else if active_cards.is_empty() {
-            CardSection::new()
-                .inner_margin(Margin::symmetric(24, 28))
-                .show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        let title = if query.is_empty() {
-                            "No firmware downloads yet"
-                        } else {
-                            "No matching downloads found"
-                        };
-                        let sub = if query.is_empty() {
-                            "Pick a firmware build in Browse or your connected device, open Firmware information, and select Download."
-                        } else {
-                            "Try searching by another firmware build, model code, or CSC."
-                        };
-                        ui.label(
-                            RichText::new(title)
-                                .font(font_id(ui, 16.0, TwoUiFontWeight::SemiBold))
-                                .color(p.text_primary),
-                        );
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(sub)
-                                .font(font_id(ui, 13.5, TwoUiFontWeight::Regular))
-                                .color(p.text_muted),
-                        );
-                    });
-                });
+            ui.add_space(48.0);
+            ui.vertical_centered(|ui| {
+                let text = if query.is_empty() {
+                    "No download yet"
+                } else {
+                    "No results"
+                };
+                ui.label(
+                    RichText::new(text)
+                        .font(font_id(ui, 15.0, TwoUiFontWeight::Regular))
+                        .color(p.text_muted),
+                );
+            });
         }
 
         if let Some(act) = action {
@@ -303,45 +289,14 @@ fn render_active_download_card(ui: &mut Ui, job: &ActiveDownloadJob) -> Option<D
                 .inner_margin(Margin::symmetric(20, 16))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let status_badge = if job.failed_error.is_some() {
-                            Some(("Failed", p.functional_red))
-                        } else if job.paused {
-                            Some(("Paused", p.text_muted))
-                        } else {
-                            match job.stage {
-                                JobStage::Preparing => Some(("Preparing", p.primary_high)),
-                                JobStage::Verifying => Some(("Verifying", p.primary_high)),
-                                JobStage::Decrypting => Some(("Decrypting", p.primary_high)),
-                                JobStage::Extracting => Some(("Extracting", p.primary_high)),
-                                JobStage::Downloading | JobStage::Completed => None,
-                            }
-                        };
-
-                        let reserve = if status_badge.is_some() { 92.0 } else { 4.0 };
-                        ui.allocate_ui_with_layout(
-                            vec2((ui.available_width() - reserve).max(80.0), 22.0),
-                            Layout::left_to_right(Align::Center),
-                            |ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&display_title)
-                                            .font(font_id(ui, 15.0, TwoUiFontWeight::SemiBold))
-                                            .color(p.text_primary),
-                                    )
-                                    .wrap_mode(TextWrapMode::Truncate),
-                                );
-                            },
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&display_title)
+                                    .font(font_id(ui, 15.0, TwoUiFontWeight::SemiBold))
+                                    .color(p.text_primary),
+                            )
+                            .wrap_mode(TextWrapMode::Truncate),
                         );
-
-                        if let Some((text, col)) = status_badge {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new(text)
-                                        .font(font_id(ui, 12.5, TwoUiFontWeight::Medium))
-                                        .color(col),
-                                );
-                            });
-                        }
                     });
 
                     ui.add_space(10.0);
@@ -353,39 +308,32 @@ fn render_active_download_card(ui: &mut Ui, job: &ActiveDownloadJob) -> Option<D
                     ui.add_space(8.0);
 
                     ui.horizontal(|ui| {
-                        let (left_text, left_col) = if job.failed_error.is_some() {
-                            ("Download failed".to_owned(), p.functional_red)
-                        } else if job.paused {
-                            (
-                                format!(
-                                    "Paused · {} / {}",
-                                    format_bytes(job.current_bytes),
-                                    format_bytes(job.total_bytes)
-                                ),
-                                p.text_muted,
-                            )
-                        } else if job.total_bytes > 0 {
-                            (
-                                format!(
-                                    "{} / {}",
-                                    format_bytes(job.current_bytes),
-                                    format_bytes(job.total_bytes)
-                                ),
-                                p.text_muted,
+                        let left_text = if job.total_bytes > 0 {
+                            format!(
+                                "{} / {}",
+                                format_bytes(job.current_bytes),
+                                format_bytes(job.total_bytes)
                             )
                         } else {
-                            ("Preparing...".to_owned(), p.text_muted)
+                            "0 B".to_owned()
                         };
 
                         ui.label(
                             RichText::new(left_text)
                                 .font(font_id(ui, 12.5, TwoUiFontWeight::Regular))
-                                .color(left_col),
+                                .color(p.text_muted),
                         );
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let right_text = if job.paused {
+                                "Paused".to_owned()
+                            } else if job.failed_error.is_some() {
+                                "Failed".to_owned()
+                            } else {
+                                format!("{:.0}%", frac * 100.0)
+                            };
                             ui.label(
-                                RichText::new(format!("{:.0}%", frac * 100.0))
+                                RichText::new(right_text)
                                     .font(font_id(ui, 12.5, TwoUiFontWeight::Regular))
                                     .color(p.text_muted),
                             );
@@ -406,12 +354,6 @@ fn render_active_download_card(ui: &mut Ui, job: &ActiveDownloadJob) -> Option<D
                 action = Some(DownloadCardAction::OpenJobWindow(job.id));
             }
 
-            let h_div = ui.available_rect_before_wrap();
-            ui.painter().line_segment(
-                [pos2(h_div.left(), h_div.top()), pos2(h_div.right(), h_div.top())],
-                Stroke::new(1.0, p.divider),
-            );
-
             let can_pause_or_resume =
                 job.stage == JobStage::Downloading || job.paused || job.failed_error.is_some();
             let right_label = if job.paused {
@@ -423,17 +365,13 @@ fn render_active_download_card(ui: &mut Ui, job: &ActiveDownloadJob) -> Option<D
             };
 
             let (bar_rect, _) =
-                ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
+                ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
             let mid_x = bar_rect.center().x;
 
-            let left_rect = egui::Rect::from_min_max(
-                bar_rect.min,
-                pos2(mid_x - 0.5, bar_rect.max.y),
-            );
-            let right_rect = egui::Rect::from_min_max(
-                pos2(mid_x + 0.5, bar_rect.min.y),
-                bar_rect.max,
-            );
+            let left_rect =
+                egui::Rect::from_min_max(bar_rect.min, pos2(mid_x - 2.0, bar_rect.max.y));
+            let right_rect =
+                egui::Rect::from_min_max(pos2(mid_x + 2.0, bar_rect.min.y), bar_rect.max);
 
             let left_resp = ui
                 .interact(
@@ -459,14 +397,6 @@ fn render_active_download_card(ui: &mut Ui, job: &ActiveDownloadJob) -> Option<D
             if left_resp.clicked() {
                 action = Some(DownloadCardAction::CancelJob(job.id));
             }
-
-            ui.painter().line_segment(
-                [
-                    pos2(mid_x, bar_rect.top() + 12.0),
-                    pos2(mid_x, bar_rect.bottom() - 12.0),
-                ],
-                Stroke::new(1.0, p.divider),
-            );
 
             let right_sense = if can_pause_or_resume {
                 Sense::click()
@@ -531,26 +461,14 @@ fn render_completed_download_row(ui: &mut Ui, rec: &DownloadJobRecord) -> bool {
 
                 let text_w = (ui.available_width() - 96.0).max(80.0);
                 ui.allocate_ui_with_layout(
-                    vec2(text_w, 42.0),
-                    Layout::top_down(Align::LEFT),
+                    vec2(text_w, 40.0),
+                    Layout::left_to_right(Align::Center),
                     |ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
                         ui.add(
                             egui::Label::new(
                                 RichText::new(&rec.file_name)
                                     .font(font_id(ui, 14.5, TwoUiFontWeight::SemiBold))
                                     .color(p.text_primary),
-                            )
-                            .wrap_mode(TextWrapMode::Truncate),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!(
-                                    "{} · {} · {}",
-                                    rec.model, rec.region, rec.fw_string
-                                ))
-                                .font(font_id(ui, 12.5, TwoUiFontWeight::Regular))
-                                .color(p.text_muted),
                             )
                             .wrap_mode(TextWrapMode::Truncate),
                         );

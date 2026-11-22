@@ -260,6 +260,7 @@ pub struct ActiveDownloadJob {
     pub bytes_per_sec: u64,
     pub active_connections: usize,
     pub segments: Vec<bloom_core::SegmentProgress>,
+    pub workers: Vec<bloom_core::WorkerProgress>,
     pub completed_output: Option<PathBuf>,
     pub window_open: bool,
     pub drawer_open: bool,

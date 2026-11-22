@@ -39,6 +39,14 @@ pub enum JobStage {
     Completed,
 }
 
+/// Real-time status & byte count for a single active HTTP worker connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerProgress {
+    pub id: usize,
+    pub downloaded: u64,
+    pub status: String,
+}
+
 /// Real-time progress snapshot emitted during download, verify, and decrypt.
 #[derive(Debug, Clone)]
 pub struct ProgressSnapshot {
@@ -48,6 +56,7 @@ pub struct ProgressSnapshot {
     pub bytes_per_sec: u64,
     pub active_connections: usize,
     pub segments: Vec<SegmentProgress>,
+    pub workers: Vec<WorkerProgress>,
 }
 
 /// Configuration options for downloading & decrypting a firmware package.
@@ -250,11 +259,44 @@ struct SharedState {
     state_meta: DownloadStateFile,
     downloaded_bytes: AtomicU64,
     active_connections: AtomicUsize,
+    worker_downloaded: Vec<AtomicU64>,
+    worker_status: Vec<std::sync::Mutex<String>>,
     handle: DownloadHandle,
     limiter: Arc<TokenBucket>,
 }
 
 impl SharedState {
+    fn set_worker_status(&self, worker_id: usize, status: &str) {
+        if let Some(cell) = self.worker_status.get(worker_id) {
+            if let Ok(mut guard) = cell.lock() {
+                if *guard != status {
+                    guard.clear();
+                    guard.push_str(status);
+                }
+            }
+        }
+    }
+
+    fn snapshot_workers(&self) -> Vec<WorkerProgress> {
+        self.worker_downloaded
+            .iter()
+            .enumerate()
+            .map(|(idx, bytes)| {
+                let status = self
+                    .worker_status
+                    .get(idx)
+                    .and_then(|m| m.lock().ok())
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|| "Disconnected".to_owned());
+                WorkerProgress {
+                    id: idx + 1,
+                    downloaded: bytes.load(Ordering::Relaxed),
+                    status,
+                }
+            })
+            .collect()
+    }
+
     async fn snapshot_progress(&self) -> (u64, Vec<SegmentProgress>) {
         let guard = self.planner.lock().await;
         (guard.downloaded_bytes(), guard.snapshot())
@@ -591,6 +633,7 @@ where
         bytes_per_sec: 0,
         active_connections: 0,
         segments: Vec::new(),
+        workers: Vec::new(),
     });
 
     let mut prepared = fus.prepare_download(&info, region, false).await?;
@@ -671,6 +714,10 @@ where
             state_meta: state_file.clone(),
             downloaded_bytes: AtomicU64::new(resumed_from_bytes),
             active_connections: AtomicUsize::new(0),
+            worker_downloaded: (0..worker_count).map(|_| AtomicU64::new(0)).collect(),
+            worker_status: (0..worker_count)
+                .map(|_| std::sync::Mutex::new("Connecting...".to_owned()))
+                .collect(),
             handle: handle.clone(),
             limiter: Arc::new(TokenBucket::new(handle.speed_limit_atomic())),
         });
@@ -715,6 +762,7 @@ where
                     bytes_per_sec: bps,
                     active_connections: progress_shared.active_connections.load(Ordering::Relaxed),
                     segments,
+                    workers: progress_shared.snapshot_workers(),
                 });
             }
         });
@@ -901,6 +949,7 @@ where
         bytes_per_sec: 0,
         active_connections: 0,
         segments: Vec::new(),
+        workers: Vec::new(),
     });
 
     Ok(DownloadOutcome {
@@ -938,6 +987,7 @@ async fn pump_stage_progress<F>(
             bytes_per_sec: bps,
             active_connections: 0,
             segments: Vec::new(),
+            workers: Vec::new(),
         });
     }
 }
@@ -1025,15 +1075,31 @@ async fn load_or_init_state(
 }
 
 async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<()> {
-    let client = build_worker_http_client()?;
-    let mut file = tokio::fs::OpenOptions::new()
+    let wid = worker_id as usize;
+    shared.set_worker_status(wid, "Connecting...");
+    let client = match build_worker_http_client() {
+        Ok(c) => c,
+        Err(e) => {
+            shared.set_worker_status(wid, "Disconnected");
+            return Err(e);
+        }
+    };
+    let mut file = match tokio::fs::OpenOptions::new()
         .write(true)
         .open(&shared.part_path)
-        .await?;
+        .await
+    {
+        Ok(f) => f,
+        Err(e) => {
+            shared.set_worker_status(wid, "Disconnected");
+            return Err(e.into());
+        }
+    };
     let mut retries = 0usize;
 
     loop {
         if shared.handle.should_stop() {
+            shared.set_worker_status(wid, "Disconnected");
             let _ = file.flush().await;
             return Ok(());
         }
@@ -1042,6 +1108,7 @@ async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<
             let mut guard = shared.planner.lock().await;
             if guard.is_complete() {
                 drop(guard);
+                shared.set_worker_status(wid, "Complete");
                 let _ = file.flush().await;
                 return Ok(());
             }
@@ -1049,6 +1116,7 @@ async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<
         };
 
         let Some(mut assign) = assignment else {
+            shared.set_worker_status(wid, "Waiting...");
             shared
                 .handle
                 .sleep_interruptible(Duration::from_millis(250))
@@ -1081,14 +1149,17 @@ async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<
             shared.downloaded_bytes.store(0, Ordering::Relaxed);
         }
 
+        shared.set_worker_status(wid, "Sending GET...");
         let response = match client.get(&prepared.url).headers(headers).send().await {
             Ok(resp) => resp,
             Err(err) => {
                 shared.planner.lock().await.release(worker_id);
                 if retries >= MAX_SEGMENT_RETRIES {
+                    shared.set_worker_status(wid, "Disconnected");
                     return Err(BloomError::Http(err));
                 }
                 retries += 1;
+                shared.set_worker_status(wid, "Reconnecting...");
                 shared
                     .handle
                     .sleep_interruptible(retry_backoff(retries))
@@ -1101,22 +1172,29 @@ async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             shared.planner.lock().await.release(worker_id);
             if retries >= MAX_SEGMENT_RETRIES {
+                shared.set_worker_status(wid, "Disconnected");
                 return Err(BloomError::Unauthorized);
             }
             retries += 1;
-            shared.refresh_auth_if_needed(seen_epoch).await?;
+            shared.set_worker_status(wid, "Refreshing auth...");
+            if let Err(err) = shared.refresh_auth_if_needed(seen_epoch).await {
+                shared.set_worker_status(wid, "Disconnected");
+                return Err(err);
+            }
             continue;
         }
 
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
             shared.planner.lock().await.release(worker_id);
             if retries >= MAX_SEGMENT_RETRIES {
+                shared.set_worker_status(wid, "Disconnected");
                 return Err(BloomError::HttpStatus {
                     status: status.as_u16(),
                     body: "CDN retry budget exhausted".into(),
                 });
             }
             retries += 1;
+            shared.set_worker_status(wid, "Reconnecting...");
             shared
                 .handle
                 .sleep_interruptible(retry_backoff(retries))
@@ -1127,12 +1205,14 @@ async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<
         if !(status == StatusCode::PARTIAL_CONTENT || (status == StatusCode::OK && assign.from == 0))
         {
             shared.planner.lock().await.release(worker_id);
+            shared.set_worker_status(wid, "Disconnected");
             return Err(BloomError::HttpStatus {
                 status: status.as_u16(),
                 body: format!("unexpected CDN status {status} for offset {}", assign.from),
             });
         }
 
+        shared.set_worker_status(wid, "Connected");
         file.seek(SeekFrom::Start(assign.from)).await?;
         let mut offset = assign.from;
 
@@ -1140,6 +1220,7 @@ async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<
         let conn_guard = ActiveConnGuard(&shared.active_connections);
         let mut stream = response.bytes_stream();
         let mut stream_err: Option<BloomError> = None;
+        let mut marked_receiving = false;
 
         loop {
             if shared.handle.should_stop() {
@@ -1179,12 +1260,19 @@ async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<
 
             match claim {
                 ClaimResult::Granted(granted) => {
+                    if !marked_receiving {
+                        marked_receiving = true;
+                        shared.set_worker_status(wid, "Receiving data...");
+                    }
                     let n = granted as usize;
                     let slice = &chunk[..n];
                     shared.limiter.acquire(slice.len()).await;
                     file.write_all(slice).await?;
                     shared.planner.lock().await.commit(worker_id, offset, granted);
                     shared.downloaded_bytes.fetch_add(granted, Ordering::Relaxed);
+                    if let Some(slot) = shared.worker_downloaded.get(wid) {
+                        slot.fetch_add(granted, Ordering::Relaxed);
+                    }
                     offset += granted;
                     retries = 0;
 
@@ -1202,14 +1290,17 @@ async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<
         shared.planner.lock().await.release(worker_id);
 
         if shared.handle.should_stop() {
+            shared.set_worker_status(wid, "Disconnected");
             return Ok(());
         }
 
         if let Some(err) = stream_err {
             if retries >= MAX_SEGMENT_RETRIES {
+                shared.set_worker_status(wid, "Disconnected");
                 return Err(err);
             }
             retries += 1;
+            shared.set_worker_status(wid, "Reconnecting...");
             shared
                 .handle
                 .sleep_interruptible(retry_backoff(retries))

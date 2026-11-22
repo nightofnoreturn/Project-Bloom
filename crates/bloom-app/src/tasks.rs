@@ -791,6 +791,11 @@ pub fn spawn_firmware_download(
                         } else if snap.stage != JobStage::Downloading {
                             job.segments.clear();
                         }
+                        if !snap.workers.is_empty() {
+                            job.workers = snap.workers;
+                        } else if snap.stage != JobStage::Downloading {
+                            job.workers.clear();
+                        }
                     }
                 }
                 prog_ctx.request_repaint();
@@ -824,6 +829,7 @@ pub fn spawn_firmware_download(
                         job.bytes_per_sec = 0;
                         job.active_connections = 0;
                         job.segments.clear();
+                        job.workers.clear();
                         job.completed_output = Some(out_path.clone());
                         should_remove = !job.window_open;
                     }
@@ -855,6 +861,9 @@ pub fn spawn_firmware_download(
                         job.paused = true;
                         job.bytes_per_sec = 0;
                         job.active_connections = 0;
+                        for w in &mut job.workers {
+                            w.status = "Disconnected".to_owned();
+                        }
                     }
                 }
             }
@@ -869,6 +878,9 @@ pub fn spawn_firmware_download(
                         job.failed_error = Some(err.to_string());
                         job.bytes_per_sec = 0;
                         job.active_connections = 0;
+                        for w in &mut job.workers {
+                            w.status = "Disconnected".to_owned();
+                        }
                     }
                 }
             }

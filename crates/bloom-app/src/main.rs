@@ -24,7 +24,6 @@ use state::{
     SharedUiState, SnackAction, CONNECTED_DEVICE_PAGE_BASE, STORAGE_KEY,
 };
 use tasks::{spawn_manual_decrypt, spawn_scan_adb_devices, spawn_sync_galaxy_db};
-use widgets::{handle_borderless_titlebar_drag, render_oneui_window_controls};
 
 static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
 
@@ -723,11 +722,10 @@ impl eframe::App for BloomApp {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ui, |ui| {
-                let panel_rect = ui.max_rect();
                 let scaffold_resp = TwoUiScaffold::new("bloom_scaffold", &page_title)
                     .subtitle(page_subtitle.as_deref())
                     .nav_button(ScaffoldNavButton::DrawerMenu)
-                    .window_controls(false)
+                    .window_controls(true)
                     .show(
                         ui,
                         |toolbar_ui| {
@@ -744,7 +742,6 @@ impl eframe::App for BloomApp {
                             {
                                 toggle_dl_search = true;
                             }
-                            let _ = render_oneui_window_controls(toolbar_ui);
                         },
                         |ui| {
                             if let Some(idx) = active_connected_idx {
@@ -772,13 +769,6 @@ impl eframe::App for BloomApp {
                         self.downloads_search_query.clear();
                     }
                 }
-                handle_borderless_titlebar_drag(
-                    ui,
-                    "bloom_main_drag",
-                    panel_rect,
-                    74.0,
-                    if is_downloads_page { 180.0 } else { 140.0 },
-                );
 
                 if is_decrypt_page {
                     let mut dec_action: Option<usize> = None;
