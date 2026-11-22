@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use bloom_core::crypto::{decrypt_file_parallel, get_v2_key, key_from_string};
 use bloom_core::{
-    adb_connect_wireless, adb_pair_and_connect_wireless, clear_render_index_cache,
-    default_device_cache_path, default_render_cache_dir, delete_galaxy_cache,
-    derive_output_filenames, download_and_decrypt, execute_safe_flash,
+    adb_connect_wireless, adb_pair_and_connect_wireless, adb_reboot_download,
+    clear_render_index_cache, default_device_cache_path, default_render_cache_dir,
+    delete_galaxy_cache, derive_output_filenames, download_and_decrypt, execute_safe_flash,
     fetch_and_cache_galaxy_devices, fetch_firmware_history, fetch_or_load_device_render_png,
     has_newer_build_in_history, list_adb_mdns_services, probe_odin_device,
     reboot_connected_to_download_mode, render_cache_key, resolve_binary_with_fallback,
@@ -396,8 +396,16 @@ pub fn spawn_check_device_update(
 
 fn store_detected_devices(
     guard: &mut SharedUiState,
-    detected: Vec<ConnectedSamsungDevice>,
+    mut detected: Vec<ConnectedSamsungDevice>,
 ) -> (bool, Vec<(String, String, Option<String>)>) {
+    if guard.flash.device_connected
+        && !detected.iter().any(ConnectedSamsungDevice::is_download_mode)
+    {
+        if let Some(ref snap) = guard.flash.device_info {
+            detected.push(ConnectedSamsungDevice::from_odin_snapshot(snap));
+        }
+    }
+
     let mut changed = false;
     if guard.connected_devices != detected {
         guard.connected_devices = detected.clone();
@@ -406,7 +414,7 @@ fn store_detected_devices(
 
     let mut pending_renders: Vec<(String, String, Option<String>)> = Vec::new();
     for dev in &detected {
-        if !dev.is_adb_ready() {
+        if !dev.can_open_device_page() {
             continue;
         }
         let key = render_cache_key(&dev.model, dev.color_code.as_deref());
@@ -433,12 +441,38 @@ pub fn spawn_scan_adb_devices(
     }
 
     rt.spawn(async move {
-        let detected = tokio::task::spawn_blocking(scan_connected_samsung_devices)
+        let mut detected = tokio::task::spawn_blocking(scan_connected_samsung_devices)
             .await
             .unwrap_or_default();
 
+        let (should_probe_odin, cached_odin_snap) = if let Ok(mut guard) = shared.lock() {
+            if guard.flash.flashing || guard.flash.probing {
+                (false, guard.flash.device_info.clone())
+            } else {
+                guard.flash.probing = true;
+                (true, None)
+            }
+        } else {
+            (false, None)
+        };
+
+        let odin_snap = if should_probe_odin {
+            probe_odin_device().await.ok().flatten()
+        } else {
+            cached_odin_snap
+        };
+
+        if let Some(ref snap) = odin_snap {
+            detected.push(ConnectedSamsungDevice::from_odin_snapshot(snap));
+        }
+
         let (changed, pending_renders) = if let Ok(mut guard) = shared.lock() {
             guard.usb_scanning = false;
+            if should_probe_odin {
+                guard.flash.probing = false;
+                guard.flash.device_connected = odin_snap.is_some();
+                guard.flash.device_info = odin_snap;
+            }
             store_detected_devices(&mut guard, detected)
         } else {
             (false, Vec::new())
@@ -927,17 +961,36 @@ pub fn spawn_reboot_to_download_mode(
     shared: Arc<Mutex<SharedUiState>>,
     ctx: egui::Context,
 ) {
-    if let Ok(mut guard) = shared.lock() {
+    let adb_serial = if let Ok(mut guard) = shared.lock() {
         if guard.flash.rebooting_to_dl || guard.flash.flashing {
             return;
         }
         guard.flash.rebooting_to_dl = true;
         guard.flash.last_error = None;
-    }
+        guard
+            .connected_devices
+            .iter()
+            .find(|d| d.is_adb_ready())
+            .map(|d| d.device_id.clone())
+    } else {
+        return;
+    };
     ctx.request_repaint();
 
     rt.spawn(async move {
-        let res = reboot_connected_to_download_mode().await;
+        let res = if let Some(serial) = adb_serial {
+            let adb_res = tokio::task::spawn_blocking(move || adb_reboot_download(Some(&serial)))
+                .await
+                .ok()
+                .and_then(|r| r.ok());
+            if adb_res.is_some() {
+                Ok(bloom_core::DownloadModeReboot::Sent)
+            } else {
+                reboot_connected_to_download_mode().await
+            }
+        } else {
+            reboot_connected_to_download_mode().await
+        };
         match res {
             Ok(outcome) => {
                 if let Ok(mut guard) = shared.lock() {

@@ -488,6 +488,12 @@ mod win_wpd {
                 battery_manufacture_date: None,
                 battery_first_use_date: None,
                 battery_current_ma: None,
+                in_maintenance_mode: false,
+                battery_peak_temp_tenths_c: None,
+                battery_capacity_rated_mah: None,
+                storage_capacity_gb: None,
+                storage_vendor: None,
+                storage_provisioning: None,
             })
         }
     }

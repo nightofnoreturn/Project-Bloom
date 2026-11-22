@@ -24,7 +24,7 @@ const TELEMETRY_SHELL_CMD: &str = concat!(
     "echo \"BLOOM_BATTERY_BEGIN\"; ",
     "dumpsys battery; ",
     "echo \"BLOOM_BATTSTATS_BEGIN\"; ",
-    "dumpsys batterystats --charged 2>/dev/null | grep -E 'Typical:|Estimated battery capacity:' | head -n 4"
+    "dumpsys batterystats --charged 2>/dev/null | grep -E 'Typical:|Rated:|Estimated battery capacity:' | head -n 4"
 );
 
 static LAST_ADB_START_ATTEMPT: Mutex<Option<Instant>> = Mutex::new(None);
@@ -54,6 +54,7 @@ pub enum DeviceConnectionMode {
     AdbReady,
     AdbUnauthorized,
     UsbStandard,
+    DownloadMode,
 }
 
 /// Android `BatteryManager.BATTERY_STATUS_*` reported by `dumpsys battery`.
@@ -147,12 +148,136 @@ pub struct ConnectedSamsungDevice {
     pub battery_manufacture_date: Option<String>,
     pub battery_first_use_date: Option<String>,
     pub battery_current_ma: Option<i32>,
+    pub in_maintenance_mode: bool,
+    pub battery_peak_temp_tenths_c: Option<i32>,
+    pub battery_capacity_rated_mah: Option<u32>,
+    pub storage_capacity_gb: Option<u32>,
+    pub storage_vendor: Option<String>,
+    pub storage_provisioning: Option<String>,
 }
 
 impl ConnectedSamsungDevice {
     /// Returns `true` when the device is authorized over ADB and exposes full telemetry.
     pub fn is_adb_ready(&self) -> bool {
         self.connection_mode == DeviceConnectionMode::AdbReady
+    }
+
+    /// Returns `true` when the device is connected in Odin Download Mode.
+    pub fn is_download_mode(&self) -> bool {
+        self.connection_mode == DeviceConnectionMode::DownloadMode
+    }
+
+    /// Returns `true` when clicking this device should open its My Device detail page.
+    pub fn can_open_device_page(&self) -> bool {
+        matches!(
+            self.connection_mode,
+            DeviceConnectionMode::AdbReady | DeviceConnectionMode::DownloadMode
+        )
+    }
+
+    /// Returns the human-friendly connection mode label (`Wi-Fi`, `ADB`, `Charging only`,
+    /// `Download mode`, `Maintenance mode`).
+    pub fn connection_label(&self) -> &'static str {
+        match self.connection_mode {
+            DeviceConnectionMode::DownloadMode => "Download mode",
+            DeviceConnectionMode::AdbReady if self.in_maintenance_mode => "Maintenance mode",
+            DeviceConnectionMode::AdbReady => match self.transport {
+                AdbTransport::Wifi => "Wi-Fi",
+                AdbTransport::Usb => "ADB",
+            },
+            DeviceConnectionMode::AdbUnauthorized => match self.transport {
+                AdbTransport::Wifi => "Wi-Fi",
+                AdbTransport::Usb => "Charging only",
+            },
+            DeviceConnectionMode::UsbStandard => "Charging only",
+        }
+    }
+
+    /// Builds a `ConnectedSamsungDevice` entry from a Download Mode `DVIF` probe snapshot.
+    pub fn from_odin_snapshot(snap: &crate::odin::OdinDeviceSnapshot) -> Self {
+        let model = snap
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_uppercase)
+            .unwrap_or_else(|| "Samsung Device".to_owned());
+        let serial = snap
+            .serial_number
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_uppercase);
+        let device_id = format!("odin:{}", serial.as_deref().unwrap_or(&model));
+        let bootloader_build = snap
+            .bootloader_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_uppercase);
+
+        Self {
+            device_id,
+            connection_mode: DeviceConnectionMode::DownloadMode,
+            transport: AdbTransport::Usb,
+            friendly_name: model.clone(),
+            manufacturer: "samsung".to_owned(),
+            model,
+            codename: None,
+            product_code: None,
+            color_code: None,
+            serial: serial.clone(),
+            usb_serial: serial,
+            csc: snap
+                .sales_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_ascii_uppercase),
+            country_code: None,
+            country_iso: None,
+            multi_csc: None,
+            one_ui_version: None,
+            android_version: None,
+            sdk_version: None,
+            security_patch: None,
+            firmware_build: bootloader_build.clone(),
+            csc_build: None,
+            cp_build: None,
+            bootloader_build,
+            build_display_id: None,
+            changelist: None,
+            knox_warranty_bit: None,
+            bootloader_locked: None,
+            soc_model: None,
+            battery_percent: None,
+            battery_status: BatteryStatus::Unknown,
+            battery_powered: false,
+            battery_temp_tenths_c: snap.temperature.map(|t| t * 10),
+            battery_voltage_mv: None,
+            battery_health_percent: None,
+            battery_capacity_typical_mah: None,
+            battery_cycle_count: None,
+            battery_manufacture_date: None,
+            battery_first_use_date: None,
+            battery_current_ma: None,
+            in_maintenance_mode: false,
+            battery_peak_temp_tenths_c: None,
+            battery_capacity_rated_mah: None,
+            storage_capacity_gb: snap.storage_capacity_gb,
+            storage_vendor: snap
+                .storage_vendor
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned),
+            storage_provisioning: snap
+                .provisioning_status
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned),
+        }
     }
 
     /// Returns the user-visible device name (falling back to the `SM-...` model string).
@@ -222,7 +347,8 @@ impl ConnectedSamsungDevice {
         self.serial
             .as_deref()
             .or(self.usb_serial.as_deref())
-            .or((self.transport == AdbTransport::Usb).then_some(self.device_id.as_str()))
+            .or((self.transport == AdbTransport::Usb && !self.is_download_mode())
+                .then_some(self.device_id.as_str()))
             .map(str::trim)
             .filter(|s| !s.is_empty())
     }
@@ -468,21 +594,23 @@ fn parse_getprop_line(line: &str) -> Option<(String, String)> {
     }
 }
 
-fn parse_bracketed_u32(raw: &str) -> Option<u32> {
+fn strip_brackets(raw: &str) -> &str {
     raw.trim()
         .trim_start_matches('[')
         .trim_end_matches(']')
         .trim()
-        .parse::<u32>()
-        .ok()
+}
+
+fn parse_bracketed_u32(raw: &str) -> Option<u32> {
+    strip_brackets(raw).parse::<u32>().ok()
+}
+
+fn parse_bracketed_i32(raw: &str) -> Option<i32> {
+    strip_brackets(raw).parse::<i32>().ok()
 }
 
 fn format_yyyymmdd(raw: &str) -> Option<String> {
-    let clean = raw
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim();
+    let clean = strip_brackets(raw);
     if clean.len() == 8 && clean.bytes().all(|b| b.is_ascii_digit()) {
         Some(format!("{}-{}-{}", &clean[..4], &clean[4..6], &clean[6..8]))
     } else {
@@ -526,32 +654,28 @@ pub fn decode_samsung_battery_qr_date(qr: &str) -> Option<String> {
     Some(format!("{year:04}-{month:02}-{day:02}"))
 }
 
+fn parse_digits_after(line: &str, marker: &str) -> Option<u32> {
+    let (_, rest) = line.split_once(marker)?;
+    let num_str: String = rest
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    num_str.parse::<u32>().ok().filter(|&mah| mah > 0)
+}
+
 fn parse_typical_capacity_from_line(line: &str) -> Option<(bool, u32)> {
-    if let Some((_, rest)) = line.split_once("Typical:") {
-        let num_str: String = rest
-            .trim()
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if let Ok(mah) = num_str.parse::<u32>() {
-            if mah > 0 {
-                return Some((true, mah));
-            }
-        }
+    if let Some(mah) = parse_digits_after(line, "Typical:") {
+        return Some((true, mah));
     }
-    if let Some((_, rest)) = line.split_once("Estimated battery capacity:") {
-        let num_str: String = rest
-            .trim()
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if let Ok(mah) = num_str.parse::<u32>() {
-            if mah > 0 {
-                return Some((false, mah));
-            }
-        }
+    if let Some(mah) = parse_digits_after(line, "Estimated battery capacity:") {
+        return Some((false, mah));
     }
     None
+}
+
+fn parse_rated_capacity_from_line(line: &str) -> Option<u32> {
+    parse_digits_after(line, "Rated:")
 }
 
 /// Parses the combined `settings` + `getprop` + `dumpsys battery` + `batterystats` ADB telemetry block.
@@ -580,6 +704,7 @@ pub fn parse_adb_telemetry_output(
     let mut battery_status = BatteryStatus::Unknown;
     let mut battery_powered = false;
     let mut battery_temp_tenths_c: Option<i32> = None;
+    let mut battery_peak_temp_tenths_c: Option<i32> = None;
     let mut battery_voltage_mv: Option<u32> = None;
     let mut battery_current_ma: Option<i32> = None;
     let mut asoc_health: Option<u8> = None;
@@ -592,6 +717,7 @@ pub fn parse_adb_telemetry_output(
     let mut qr_man_date: Option<String> = None;
     let mut typical_capacity_mah: Option<u32> = None;
     let mut est_capacity_mah: Option<u32> = None;
+    let mut rated_capacity_mah: Option<u32> = None;
 
     for line in raw.lines() {
         let trimmed = line.trim();
@@ -646,6 +772,20 @@ pub fn parse_adb_telemetry_output(
                     if let Some(v) = parse_bracketed_u32(raw_soh) {
                         if (1..=100).contains(&v) {
                             bsoh_health = Some(v as u8);
+                        }
+                    }
+                } else if let Some(raw_peak) = trimmed.strip_prefix("mSavedBatteryMaxTemp:") {
+                    if let Some(t) = parse_bracketed_i32(raw_peak) {
+                        if (1..1500).contains(&t) {
+                            battery_peak_temp_tenths_c = Some(t);
+                        }
+                    }
+                } else if let Some((_, raw_peak)) = trimmed.split_once("MaxTempData efsValue:") {
+                    if battery_peak_temp_tenths_c.is_none() {
+                        if let Some(t) = parse_bracketed_i32(raw_peak) {
+                            if (1..1500).contains(&t) {
+                                battery_peak_temp_tenths_c = Some(t);
+                            }
                         }
                     }
                 } else if let Some(raw_usage) = trimmed.strip_prefix("mSavedBatteryUsage:") {
@@ -749,6 +889,9 @@ pub fn parse_adb_telemetry_output(
                     } else if est_capacity_mah.is_none() {
                         est_capacity_mah = Some(mah);
                     }
+                }
+                if rated_capacity_mah.is_none() {
+                    rated_capacity_mah = parse_rated_capacity_from_line(trimmed);
                 }
             }
         }
@@ -886,7 +1029,11 @@ pub fn parse_adb_telemetry_output(
         _ => None,
     };
 
-    let battery_health_percent = asoc_health.or(bsoh_health);
+    let in_maintenance_mode =
+        first_non_empty_prop(&props, &["persist.sys.is_in_maintenance_mode"])
+            .is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1");
+
+    let battery_health_percent = bsoh_health.or(asoc_health);
     let battery_cycle_count = usage_cycles.or(efs_cycles);
     let battery_capacity_typical_mah = typical_capacity_mah.or(est_capacity_mah);
     let battery_manufacture_date = llb_man_date
@@ -937,6 +1084,12 @@ pub fn parse_adb_telemetry_output(
         battery_manufacture_date,
         battery_first_use_date,
         battery_current_ma,
+        in_maintenance_mode,
+        battery_peak_temp_tenths_c,
+        battery_capacity_rated_mah: rated_capacity_mah,
+        storage_capacity_gb: None,
+        storage_vendor: None,
+        storage_provisioning: None,
     })
 }
 
@@ -1129,6 +1282,19 @@ fn query_adb_shell(serial: &str, shell_cmd: &str) -> Option<String> {
         }
     }
     Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Reboots an ADB-connected Samsung device directly into Odin Download Mode (`reboot:download`).
+pub fn adb_reboot_download(serial: Option<&str>) -> std::result::Result<(), String> {
+    let mut stream = ensure_adb_stream(ADB_IO_TIMEOUT)
+        .ok_or_else(|| "ADB server is not running".to_owned())?;
+    let transport_cmd = match serial.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => format!("host:transport:{s}"),
+        None => "host:transport-any".to_owned(),
+    };
+    send_adb_packet(&mut stream, &transport_cmd).map_err(|e| e.to_string())?;
+    send_adb_packet(&mut stream, "reboot:download").map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Discovers local wireless ADB mDNS services (`_adb-tls-pairing._tcp`, `_adb-tls-connect._tcp`).
@@ -1420,6 +1586,12 @@ pub fn merge_and_deduplicate_devices(
             battery_manufacture_date: None,
             battery_first_use_date: None,
             battery_current_ma: None,
+            in_maintenance_mode: false,
+            battery_peak_temp_tenths_c: None,
+            battery_capacity_rated_mah: None,
+            storage_capacity_gb: None,
+            storage_vendor: None,
+            storage_provisioning: None,
         });
     }
 
@@ -1500,6 +1672,12 @@ mod tests {
             battery_manufacture_date: None,
             battery_first_use_date: None,
             battery_current_ma: None,
+            in_maintenance_mode: false,
+            battery_peak_temp_tenths_c: None,
+            battery_capacity_rated_mah: None,
+            storage_capacity_gb: None,
+            storage_vendor: None,
+            storage_provisioning: None,
         }
     }
 
@@ -1617,6 +1795,7 @@ LLB MAN:
   battery FirstUseDate: [20251225]
   mSavedBatteryAsoc: [96]
   mSavedBatteryUsage: [62798]
+  mSavedBatteryMaxTemp: [554]
 11-18 18:23:06.354  [SS][BattInfo]QrData efsValue:GH43-05193A+DL1YA22AS+01294N
 [HiccupLogBuffer]
 mSavedBatteryBsoh: 92
@@ -1628,6 +1807,8 @@ BLOOM_BATTSTATS_BEGIN
         let dev = parse_adb_telemetry_output("RRGYC063QZR", AdbTransport::Usb, raw)
             .expect("valid samsung telemetry");
         assert!(dev.is_adb_ready());
+        assert!(!dev.in_maintenance_mode);
+        assert_eq!(dev.connection_label(), "ADB");
         assert_eq!(dev.friendly_name, "A35 5G milik Fauzan");
         assert_eq!(dev.model, "SM-S921B");
         assert_eq!(dev.codename.as_deref(), Some("e1s"));
@@ -1644,13 +1825,65 @@ BLOOM_BATTSTATS_BEGIN
         assert_eq!(dev.bootloader_locked, Some(true));
         assert_eq!(dev.soc_model.as_deref(), Some("Samsung s5e9945"));
         assert_eq!(dev.battery_percent, Some(99));
-        assert_eq!(dev.battery_health_percent, Some(96));
+        assert_eq!(dev.battery_health_percent, Some(92));
+        assert_eq!(dev.battery_peak_temp_tenths_c, Some(554));
+        assert_eq!(dev.battery_capacity_rated_mah, Some(3880));
         assert_eq!(dev.battery_capacity_typical_mah, Some(4000));
         assert_eq!(dev.battery_cycle_count, Some(627));
         assert_eq!(dev.battery_manufacture_date.as_deref(), Some("2025-10-22"));
         assert_eq!(dev.battery_first_use_date.as_deref(), Some("2025-12-25"));
         assert_eq!(dev.battery_current_ma, Some(-117));
         assert!(dev.should_animate_battery_gradient());
+    }
+
+    #[test]
+    fn resolves_bsoh_fallback_maintenance_mode_and_connection_labels() {
+        let maint_raw = r#"
+BLOOM_PROPS_BEGIN
+[ro.product.manufacturer]: [samsung]
+[ro.product.model]: [SM-S921B]
+[persist.sys.is_in_maintenance_mode]: [true]
+BLOOM_BATTERY_BEGIN
+  mSavedBatteryAsoc: [96]
+"#;
+        let maint = parse_adb_telemetry_output("RRGYC063QZR", AdbTransport::Usb, maint_raw)
+            .expect("valid maintenance telemetry");
+        assert!(maint.in_maintenance_mode);
+        assert_eq!(maint.battery_health_percent, Some(96));
+        assert_eq!(maint.connection_label(), "Maintenance mode");
+
+        let no_health_raw = r#"
+BLOOM_PROPS_BEGIN
+[ro.product.manufacturer]: [samsung]
+[ro.product.model]: [SM-S921B]
+BLOOM_BATTERY_BEGIN
+  level: 80
+"#;
+        let none_dev = parse_adb_telemetry_output("192.168.1.9:5555", AdbTransport::Wifi, no_health_raw)
+            .expect("valid wifi telemetry");
+        assert_eq!(none_dev.battery_health_percent, None);
+        assert_eq!(none_dev.connection_label(), "Wi-Fi");
+
+        let usb_std = stub_device("wpd", DeviceConnectionMode::UsbStandard, AdbTransport::Usb, None);
+        assert_eq!(usb_std.connection_label(), "Charging only");
+
+        let dl_dev = ConnectedSamsungDevice::from_odin_snapshot(&crate::odin::OdinDeviceSnapshot {
+            model: Some("SM-S921B".into()),
+            sales_code: Some("XID".into()),
+            bootloader_version: Some("S921BXXUIEZJD".into()),
+            serial_number: Some("CE10259A".into()),
+            storage_capacity_gb: Some(256),
+            storage_vendor: Some("SAMSUNG".into()),
+            provisioning_status: Some("PASS".into()),
+            temperature: Some(46),
+            binary_version: Some(9),
+        });
+        assert!(dl_dev.is_download_mode());
+        assert!(dl_dev.can_open_device_page());
+        assert_eq!(dl_dev.connection_label(), "Download mode");
+        assert_eq!(dl_dev.storage_capacity_gb, Some(256));
+        assert_eq!(dl_dev.storage_vendor.as_deref(), Some("SAMSUNG"));
+        assert_eq!(dl_dev.storage_provisioning.as_deref(), Some("PASS"));
     }
 
     #[test]

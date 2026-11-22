@@ -13,7 +13,7 @@ pub mod wpd;
 pub mod xml;
 
 pub use adb::{
-    adb_connect_wireless, adb_pair_and_connect_wireless, adb_pair_wireless,
+    adb_connect_wireless, adb_pair_and_connect_wireless, adb_pair_wireless, adb_reboot_download,
     extract_color_code_from_product_code, generate_adb_qr_session, list_adb_mdns_services,
     merge_and_deduplicate_devices, parse_mdns_services_output, parse_one_ui_prop,
     scan_connected_samsung_devices, AdbDeviceListEntry, AdbMdnsService, AdbTransport,

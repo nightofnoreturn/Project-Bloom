@@ -196,13 +196,15 @@ fn is_supported_odin_package(path: &Path) -> bool {
         })
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OdinDeviceSnapshot {
     pub model: Option<String>,
     pub sales_code: Option<String>,
     pub bootloader_version: Option<String>,
     pub serial_number: Option<String>,
     pub storage_capacity_gb: Option<u32>,
+    pub storage_vendor: Option<String>,
+    pub provisioning_status: Option<String>,
     pub temperature: Option<i32>,
     pub binary_version: Option<u8>,
 }
@@ -389,7 +391,7 @@ pub fn validate_odin_preflight(
         }
 
         if let Some(temp) = dev.temperature {
-            if temp >= 45 {
+            if temp >= 55 {
                 issues.push(OdinSafetyIssue::Warning(format!(
                     "Device temperature is warm ({temp}°C). Let it cool if flashing fails."
                 )));
@@ -411,6 +413,8 @@ fn snapshot_from_device_info(info: &DeviceInfo) -> OdinDeviceSnapshot {
         bootloader_version: info.bootloader_version.clone(),
         serial_number: info.serial_number.clone(),
         storage_capacity_gb: info.storage_capacity_gb,
+        storage_vendor: info.storage_vendor.clone(),
+        provisioning_status: info.provisioning_status.clone(),
         temperature: info.temperature,
         binary_version,
     }

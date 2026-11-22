@@ -4,7 +4,7 @@ use bloom_core::{
 };
 use egui::{
     pos2, vec2, Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Rect, RichText, Sense,
-    Stroke, StrokeKind, Ui,
+    Stroke, StrokeKind, TextWrapMode, Ui,
 };
 use egui_twoui::prelude::*;
 use egui_twoui::tokens::dimens;
@@ -144,6 +144,44 @@ fn normalize_one_ui_value(raw: &str) -> &str {
         .strip_prefix("One UI ")
         .or_else(|| trimmed.strip_prefix("one ui "))
         .unwrap_or(trimmed)
+}
+
+fn format_storage_vendor(raw: &str) -> String {
+    let trimmed = raw.trim();
+    match trimmed.to_ascii_uppercase().as_str() {
+        "SAMSUNG" => "Samsung".to_owned(),
+        "MICRON" => "Micron".to_owned(),
+        "SKHYNIX" | "SK HYNIX" | "HYNIX" => "SK Hynix".to_owned(),
+        "KIOXIA" => "Kioxia".to_owned(),
+        "TOSHIBA" => "Toshiba".to_owned(),
+        "WDC" | "SANDISK" => "Western Digital".to_owned(),
+        _ => {
+            if trimmed.chars().all(|c| !c.is_ascii_lowercase()) && trimmed.len() > 1 {
+                let mut chars = trimmed.chars();
+                match chars.next() {
+                    Some(first) => format!(
+                        "{}{}",
+                        first.to_ascii_uppercase(),
+                        chars.as_str().to_ascii_lowercase()
+                    ),
+                    None => String::new(),
+                }
+            } else {
+                trimmed.to_owned()
+            }
+        }
+    }
+}
+
+fn format_storage_provisioning(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("PASS") {
+        "Passed".to_owned()
+    } else if trimmed.eq_ignore_ascii_case("FAIL") {
+        "Failed".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn truncate_dialog_notes(notes: &str, max_chars: usize) -> String {
@@ -378,12 +416,14 @@ impl BloomApp {
                             .font(font_id(ui, 17.5, TwoUiFontWeight::SemiBold))
                             .color(p.text_primary),
                     );
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new(&dev.model)
-                            .font(font_id(ui, 13.5, TwoUiFontWeight::Medium))
-                            .color(p.text_muted),
-                    );
+                    if !device_heading.eq_ignore_ascii_case(&dev.model) {
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(&dev.model)
+                                .font(font_id(ui, 13.5, TwoUiFontWeight::Medium))
+                                .color(p.text_muted),
+                        );
+                    }
                     if let Some(serial) = dev.effective_serial() {
                         ui.add_space(2.0);
                         ui.label(
@@ -394,6 +434,18 @@ impl BloomApp {
                     }
                 });
             });
+
+        if dev.is_download_mode() {
+            ui.add_space(10.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("Download mode")
+                        .font(font_id(ui, 13.5, TwoUiFontWeight::Medium))
+                        .color(p.text_muted),
+                );
+            });
+            return;
+        }
 
         ui.add_space(8.0);
 
@@ -567,10 +619,15 @@ impl BloomApp {
                 ui.add(CardItem::new("Device name").summary(dev.display_title()));
                 ui.add(
                     CardItem::new("Connection")
-                        .summary(dev.transport.label())
+                        .summary(dev.connection_label())
                         .top_divider(true),
                 );
             });
+
+        if dev.is_download_mode() {
+            self.render_download_mode_info_subpane(ui, dev, decoded);
+            return;
+        }
 
         // 2. Software information
         let matched_hist_item = dev.firmware_build.as_deref().and_then(|fw| {
@@ -730,6 +787,7 @@ impl BloomApp {
             || dev.battery_manufacture_date.is_some()
             || dev.battery_first_use_date.is_some()
             || dev.battery_temp_tenths_c.is_some()
+            || dev.battery_peak_temp_tenths_c.is_some()
             || dev.battery_current_ma.is_some();
 
         if has_battery_section {
@@ -784,14 +842,16 @@ impl BloomApp {
                         has_bat_rows = true;
                     }
 
-                    if let Some(health) = dev.battery_health_percent {
-                        ui.add(
-                            CardItem::new("Battery health")
-                                .summary(format!("{health}%"))
-                                .top_divider(has_bat_rows),
-                        );
-                        has_bat_rows = true;
-                    }
+                    let health_str = match dev.battery_health_percent {
+                        Some(health) => format!("{health}%"),
+                        None => "Not available".to_owned(),
+                    };
+                    ui.add(
+                        CardItem::new("Battery health")
+                            .summary(health_str)
+                            .top_divider(has_bat_rows),
+                    );
+                    has_bat_rows = true;
 
                     if let Some(cycles) = dev.battery_cycle_count {
                         ui.add(
@@ -829,6 +889,15 @@ impl BloomApp {
                         has_bat_rows = true;
                     }
 
+                    if let Some(peak) = dev.battery_peak_temp_tenths_c {
+                        ui.add(
+                            CardItem::new("Peak temperature")
+                                .summary(format!("{:.1} °C", f64::from(peak) / 10.0))
+                                .top_divider(has_bat_rows),
+                        );
+                        has_bat_rows = true;
+                    }
+
                     if let Some(ma) = dev.battery_current_ma {
                         let cur_str = if ma > 0 {
                             format!("+{ma} mA")
@@ -841,6 +910,34 @@ impl BloomApp {
                                 .top_divider(has_bat_rows),
                         );
                     }
+                });
+
+            let disclaimer = if let Some(rated) = dev.battery_capacity_rated_mah {
+                format!(
+                    "The typical capacity has been tested under third-party laboratory conditions. \
+                    The typical capacity is the estimated average capacity considering the deviation in \
+                    battery capacity among the battery samples tested under the IEC 61960 standard. \
+                    The rated capacity is {rated} mAh. Actual battery life may vary depending on \
+                    network environment, usage pattern, and other factors."
+                )
+            } else {
+                "The typical capacity has been tested under third-party laboratory conditions. \
+                The typical capacity is the estimated average capacity considering the deviation in \
+                battery capacity among the battery samples tested under the IEC 61960 standard. \
+                Actual battery life may vary depending on network environment, usage pattern, and other factors."
+                    .to_owned()
+            };
+            Frame::NONE
+                .inner_margin(Margin::symmetric(20, 8))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(disclaimer)
+                                .font(font_id(ui, 12.0, TwoUiFontWeight::Regular))
+                                .color(p.text_muted),
+                        )
+                        .wrap_mode(TextWrapMode::Wrap),
+                    );
                 });
         }
 
@@ -865,6 +962,117 @@ impl BloomApp {
                             CardItem::new("Bootloader")
                                 .summary(if locked { "Locked" } else { "Unlocked" })
                                 .top_divider(has_hw_row),
+                        );
+                    }
+                });
+        }
+    }
+
+    fn render_download_mode_info_subpane(
+        &self,
+        ui: &mut Ui,
+        dev: &ConnectedSamsungDevice,
+        decoded: Option<&DecodedBuildCode>,
+    ) {
+        let csc_str = dev.csc.as_deref().map(|code| {
+            self.csc_db
+                .find_exact(code)
+                .map(|item| item.region_label())
+                .unwrap_or_else(|| code.to_owned())
+        });
+        let binary_str = decoded.map(|d| d.bootloader_level.to_string());
+
+        if !dev.model.is_empty()
+            || csc_str.is_some()
+            || dev.bootloader_build.is_some()
+            || binary_str.is_some()
+        {
+            SectionHeader::new("Software information").show(ui);
+            CardSection::new()
+                .inner_margin(Margin::symmetric(0, 6))
+                .show(ui, |ui| {
+                    let mut has_rows = false;
+
+                    if !dev.model.is_empty() {
+                        ui.add(
+                            CardItem::new("Model")
+                                .summary(&dev.model)
+                                .top_divider(has_rows),
+                        );
+                        has_rows = true;
+                    }
+
+                    if let Some(ref csc_val) = csc_str {
+                        ui.add(
+                            CardItem::new("CSC")
+                                .summary(csc_val)
+                                .top_divider(has_rows),
+                        );
+                        has_rows = true;
+                    }
+
+                    if let Some(ref bl) = dev.bootloader_build {
+                        ui.add(
+                            CardItem::new("Bootloader")
+                                .summary(bl)
+                                .top_divider(has_rows),
+                        );
+                        has_rows = true;
+                    }
+
+                    if let Some(ref bin_val) = binary_str {
+                        ui.add(
+                            CardItem::new("Binary")
+                                .summary(bin_val)
+                                .top_divider(has_rows),
+                        );
+                    }
+                });
+        }
+
+        if dev.storage_capacity_gb.is_some()
+            || dev.storage_vendor.is_some()
+            || dev.storage_provisioning.is_some()
+            || dev.battery_temp_tenths_c.is_some()
+        {
+            SectionHeader::new("Hardware information").show(ui);
+            CardSection::new()
+                .inner_margin(Margin::symmetric(0, 6))
+                .show(ui, |ui| {
+                    let mut has_rows = false;
+
+                    if let Some(gb) = dev.storage_capacity_gb {
+                        ui.add(
+                            CardItem::new("Storage")
+                                .summary(format!("{gb} GB"))
+                                .top_divider(has_rows),
+                        );
+                        has_rows = true;
+                    }
+
+                    if let Some(ref vendor) = dev.storage_vendor {
+                        ui.add(
+                            CardItem::new("Storage vendor")
+                                .summary(format_storage_vendor(vendor))
+                                .top_divider(has_rows),
+                        );
+                        has_rows = true;
+                    }
+
+                    if let Some(ref prov) = dev.storage_provisioning {
+                        ui.add(
+                            CardItem::new("Storage check")
+                                .summary(format_storage_provisioning(prov))
+                                .top_divider(has_rows),
+                        );
+                        has_rows = true;
+                    }
+
+                    if let Some(temp) = dev.battery_temp_tenths_c {
+                        ui.add(
+                            CardItem::new("Temperature")
+                                .summary(format!("{} °C", temp / 10))
+                                .top_divider(has_rows),
                         );
                     }
                 });

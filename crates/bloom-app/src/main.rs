@@ -593,12 +593,12 @@ impl eframe::App for BloomApp {
         }
         ui.ctx().request_repaint_after(Duration::from_secs(3));
 
-        // Notify user via SuggestiveSnackBar when a Samsung device newly connects or enables ADB.
+        // Notify user via SuggestiveSnackBar when a Samsung device newly connects or enables ADB / Download mode.
         let newly_notifiable = connected_devices.iter().find(|d| {
             let key = d.stable_identity_key();
             match self.known_connected_states.get(&key) {
                 None => true,
-                Some(&was_adb_ready) => !was_adb_ready && d.is_adb_ready(),
+                Some(&was_openable) => !was_openable && d.can_open_device_page(),
             }
         });
         if let Some(dev) = newly_notifiable {
@@ -611,7 +611,7 @@ impl eframe::App for BloomApp {
         }
         self.known_connected_states = connected_devices
             .iter()
-            .map(|d| (d.stable_identity_key(), d.is_adb_ready()))
+            .map(|d| (d.stable_identity_key(), d.can_open_device_page()))
             .collect();
 
         // Fall back to Browse if the currently open connected phone is unplugged.
@@ -697,7 +697,7 @@ impl eframe::App for BloomApp {
 
         if self.page_id >= CONNECTED_DEVICE_PAGE_BASE {
             if let Some(dev) = connected_devices.get(self.page_id - CONNECTED_DEVICE_PAGE_BASE) {
-                if !dev.is_adb_ready() {
+                if !dev.can_open_device_page() {
                     self.page_id = if prev_page_id >= CONNECTED_DEVICE_PAGE_BASE {
                         BloomPage::Browse.id()
                     } else {
@@ -712,7 +712,9 @@ impl eframe::App for BloomApp {
         let active_connected_idx = self
             .page_id
             .checked_sub(CONNECTED_DEVICE_PAGE_BASE)
-            .filter(|&idx| idx < connected_devices.len() && connected_devices[idx].is_adb_ready());
+            .filter(|&idx| {
+                idx < connected_devices.len() && connected_devices[idx].can_open_device_page()
+            });
 
         let current_page = BloomPage::from_id(self.page_id);
         let (page_title, page_subtitle): (String, Option<String>) =
@@ -968,7 +970,7 @@ impl eframe::App for BloomApp {
                     if let Some((idx, dev)) = connected_devices.iter().enumerate().find(|(_, d)| {
                         d.stable_identity_key() == target_key || d.device_id == target_key
                     }) {
-                        if dev.is_adb_ready() {
+                        if dev.can_open_device_page() {
                             self.page_id = CONNECTED_DEVICE_PAGE_BASE + idx;
                         } else {
                             self.non_adb_dialog_device = Some(dev.clone());
