@@ -1,6 +1,6 @@
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Layout, Margin, Response,
-    RichText, Stroke, TextEdit, Ui,
+    vec2, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Layout, Margin,
+    Response, RichText, Stroke, TextEdit, Ui,
 };
 use egui_twoui::prelude::*;
 use egui_twoui::tokens::dimens;
