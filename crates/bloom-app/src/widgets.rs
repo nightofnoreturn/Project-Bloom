@@ -258,6 +258,7 @@ pub fn pill_tag(ui: &mut Ui, text: &str, bg: Color32, fg: Color32) {
 }
 
 /// Clean two-column key/value detail row styled for `CardSection`.
+#[allow(dead_code)]
 pub fn key_value_row(ui: &mut Ui, key: &str, value: &str, accent_value: bool) {
     let theme = theme_from_ui(ui);
     let p = &theme.palette;

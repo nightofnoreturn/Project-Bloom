@@ -3,17 +3,14 @@ use bloom_core::{
     GalaxyCategory, GalaxyDevice, GalaxyTabSubCategory, HistoryItem,
 };
 use egui::{
-    pos2, vec2, Align, Align2, Area, Color32, CornerRadius, Frame, Id, Layout, Margin, Order,
-    Rect, RichText, Sense, Stroke, StrokeKind, Ui,
+    pos2, vec2, Align, Align2, Area, CornerRadius, Id, Layout, Margin, Order, Rect, RichText,
+    Sense, Stroke, StrokeKind, Ui,
 };
 use egui_twoui::feedback::{interaction_factors, paint_state_overlay, recoil_rect};
 use egui_twoui::prelude::*;
 
-use crate::state::{
-    extract_emblem_text, format_firmware_tile_title, format_tile_date, short_build_tail,
-    BloomPage, BrowseStep,
-};
-use crate::widgets::{key_value_row, pill_tag, status_banner};
+use crate::state::{format_firmware_tile_title, format_tile_date, BloomPage, BrowseStep};
+use crate::widgets::{pill_tag, status_banner};
 use crate::BloomApp;
 
 const MAX_DEVICE_LIST_ROWS: usize = 120;
@@ -1003,7 +1000,7 @@ impl BloomApp {
             self.selected_my_device = None;
             self.selected_my_region = None;
             self.selected_grid_build = None;
-            self.build_detail_sheet_open = false;
+            self.firmware_info_open = false;
             return;
         }
 
@@ -1066,9 +1063,13 @@ impl BloomApp {
         let tile_w = ((avail_w - gap * (cols as f32 - 1.0)) / cols as f32)
             .floor()
             .max(100.0);
-        let box_h = (tile_w * 0.78).clamp(96.0, 142.0);
+        let box_h = tile_w;
 
-        let mut clicked_build: Option<HistoryItem> = None;
+        enum ClickedCard {
+            OpenInfo(HistoryItem),
+            ConfirmLocked(HistoryItem),
+        }
+        let mut clicked_card: Option<ClickedCard> = None;
 
         for (chunk_idx, row_items) in res.items.chunks(cols).enumerate() {
             if chunk_idx > 0 {
@@ -1082,21 +1083,24 @@ impl BloomApp {
                     let is_now = installed_build
                         .as_deref()
                         .is_some_and(|cur| item.build.eq_ignore_ascii_case(cur));
-                    let is_locked = installed_bit.is_some_and(|cur_bit| {
+                    let is_lower_binary = installed_bit.is_some_and(|cur_bit| {
                         decoded
                             .as_ref()
                             .is_some_and(|d| d.is_downgrade_blocked(cur_bit))
                     });
+                    let is_locked = is_lower_binary && !self.config.allow_lower_binary;
+                    let is_latest = global_idx == 0;
 
                     let tile_title = format_firmware_tile_title(
                         item.one_ui_version.as_deref(),
                         item.android_version.as_deref(),
                     );
-                    let emblem = extract_emblem_text(
-                        item.one_ui_version.as_deref(),
-                        item.android_version.as_deref(),
-                    );
                     let build_date = format_tile_date(item);
+                    let type_label = match decoded.as_ref().map(|d| d.update_type) {
+                        Some(FirmwareUpdateType::Feature) => "Feature",
+                        Some(FirmwareUpdateType::Security) => "Security",
+                        _ => "Update",
+                    };
 
                     ui.vertical(|ui| {
                         ui.set_width(tile_w);
@@ -1105,20 +1109,27 @@ impl BloomApp {
                         let (tile_rect, tile_resp) =
                             ui.allocate_exact_size(vec2(tile_w, box_h), Sense::click());
                         if ui.is_rect_visible(tile_rect) {
-                            let (press_t, hover_t) = interaction_factors(ui, &tile_resp);
+                            let (press_t, hover_t) = if is_locked {
+                                (0.0, 0.0)
+                            } else {
+                                interaction_factors(ui, &tile_resp)
+                            };
                             let vis_rect = recoil_rect(tile_rect, press_t, 1.0);
                             let radius = CornerRadius::same(22);
 
-                            let fill = if is_now {
-                                p.selected_bg
+                            let (fill, stroke) = if is_now {
+                                (p.selected_bg, Stroke::new(2.0, p.primary))
+                            } else if is_locked {
+                                (
+                                    p.surface.gamma_multiply(0.55),
+                                    Stroke::new(0.85, p.floating_stroke.gamma_multiply(0.55)),
+                                )
+                            } else if is_latest {
+                                (p.surface, Stroke::new(2.0, p.functional_green))
                             } else {
-                                p.surface
+                                (p.surface, Stroke::new(0.85, p.floating_stroke))
                             };
-                            let stroke = if is_now {
-                                Stroke::new(1.6, p.primary)
-                            } else {
-                                Stroke::new(0.85, p.floating_stroke)
-                            };
+
                             ui.painter().rect(
                                 vis_rect,
                                 radius,
@@ -1126,124 +1137,54 @@ impl BloomApp {
                                 stroke,
                                 StrokeKind::Inside,
                             );
-                            paint_state_overlay(ui, vis_rect, radius, p, hover_t, press_t);
-
-                            // Top-left status pill: `Now` (installed on USB phone) or `Latest` (server newest)
-                            if is_now || global_idx == 0 {
-                                let (badge_label, badge_bg, badge_fg) = if is_now {
-                                    ("Now", p.primary, p.on_primary)
-                                } else {
-                                    ("Latest", p.selected_bg, p.primary_high)
-                                };
-                                let tag_g = ui.painter().layout_no_wrap(
-                                    badge_label.to_owned(),
-                                    font_id(ui, 10.0, TwoUiFontWeight::SemiBold),
-                                    badge_fg,
-                                );
-                                let pill_sz = tag_g.size() + vec2(12.0, 4.0);
-                                let pill_rect = Rect::from_min_size(
-                                    pos2(vis_rect.left() + 10.0, vis_rect.top() + 10.0),
-                                    pill_sz,
-                                );
-                                ui.painter().rect_filled(
-                                    pill_rect,
-                                    CornerRadius::same(8),
-                                    badge_bg,
-                                );
-                                ui.painter().galley(
-                                    pill_rect.center() - tag_g.size() * 0.5,
-                                    tag_g,
-                                    badge_fg,
-                                );
+                            if !is_locked {
+                                paint_state_overlay(ui, vis_rect, radius, p, hover_t, press_t);
                             }
 
-                            // Top-right update-type visual icon (Feature = Star, Security = SecurityOutline)
-                            if let Some(ref d) = decoded {
-                                let type_icon_col = |base: Color32| {
-                                    if is_locked {
-                                        base.gamma_multiply(0.45)
-                                    } else {
-                                        base
-                                    }
-                                };
-                                let icon_rect = Rect::from_center_size(
-                                    pos2(vis_rect.right() - 16.0, vis_rect.top() + 16.0),
-                                    vec2(14.0, 14.0),
-                                );
-                                match d.update_type {
-                                    FirmwareUpdateType::Feature => {
-                                        TwoUiIcon::Star.paint(
-                                            ui,
-                                            icon_rect,
-                                            type_icon_col(p.primary_high),
-                                        );
-                                    }
-                                    FirmwareUpdateType::Security => {
-                                        TwoUiIcon::SecurityOutline.paint(
-                                            ui,
-                                            icon_rect,
-                                            type_icon_col(p.functional_green),
-                                        );
-                                    }
-                                    FirmwareUpdateType::Other(_) => {}
-                                }
-                            }
-
-                            // Center One UI / Android number emblem
-                            let emblem_center = vis_rect.center() - vec2(0.0, 4.0);
-                            let emblem_r = (box_h * 0.24).clamp(18.0, 26.0);
-                            let halo_col = p
-                                .primary
-                                .gamma_multiply(if is_locked { 0.06 } else { 0.14 });
-                            ui.painter().circle_filled(emblem_center, emblem_r, halo_col);
-
-                            let emblem_fg = if is_locked {
+                            let text_fg = if is_locked {
                                 p.text_disabled
                             } else {
-                                p.primary_high
+                                p.text_primary
                             };
-                            let emblem_size = if emblem.len() >= 4 { 14.5 } else { 18.0 };
-                            let os_g = ui.painter().layout_no_wrap(
-                                emblem,
-                                font_id(ui, emblem_size, TwoUiFontWeight::SemiBold),
-                                emblem_fg,
-                            );
-                            ui.painter().galley(
-                                emblem_center - os_g.size() * 0.5,
-                                os_g,
-                                emblem_fg,
+                            let type_g = ui.painter().layout_no_wrap(
+                                type_label.to_owned(),
+                                font_id(ui, 15.0, TwoUiFontWeight::SemiBold),
+                                text_fg,
                             );
 
-                            // Bottom-center subtle 4-char revision tail (e.g. EZJD)
-                            let tail = short_build_tail(&item.build);
-                            let pda_g = ui.painter().layout_no_wrap(
-                                tail.to_owned(),
-                                font_id(ui, 11.0, TwoUiFontWeight::Medium),
-                                p.text_muted,
-                            );
-                            let text_pos = pos2(
-                                vis_rect.center().x - pda_g.size().x * 0.5,
-                                vis_rect.bottom() - pda_g.size().y - 9.0,
-                            );
-                            ui.painter()
-                                .with_clip_rect(vis_rect.shrink(6.0))
-                                .galley(text_pos, pda_g, p.text_muted);
-
-                            // Bottom-right LockOutline icon if Bootloader Bit < installed Bit
                             if is_locked {
+                                let gap_y = 6.0;
+                                let icon_h = 20.0;
+                                let total_h = icon_h + gap_y + type_g.size().y;
+                                let top_y = vis_rect.center().y - total_h * 0.5;
                                 let lock_rect = Rect::from_center_size(
-                                    pos2(vis_rect.right() - 16.0, vis_rect.bottom() - 15.0),
-                                    vec2(13.0, 13.0),
+                                    pos2(vis_rect.center().x, top_y + icon_h * 0.5),
+                                    vec2(icon_h, icon_h),
                                 );
-                                TwoUiIcon::LockOutline.paint(ui, lock_rect, p.text_muted);
+                                TwoUiIcon::Lock.paint(ui, lock_rect, p.text_disabled);
+                                let text_pos = pos2(
+                                    vis_rect.center().x - type_g.size().x * 0.5,
+                                    top_y + icon_h + gap_y,
+                                );
+                                ui.painter().galley(text_pos, type_g, text_fg);
+                            } else {
+                                ui.painter().galley(
+                                    vis_rect.center() - type_g.size() * 0.5,
+                                    type_g,
+                                    text_fg,
+                                );
                             }
                         }
 
                         if tile_resp.clicked() {
-                            clicked_build = Some(item.clone());
+                            clicked_card = Some(if is_locked {
+                                ClickedCard::ConfirmLocked(item.clone())
+                            } else {
+                                ClickedCard::OpenInfo(item.clone())
+                            });
                         }
 
-                        // Strictly 2 short lines below kotak: One UI/OS title + date
+                        // Strictly 2 short lines below card: One UI/OS title + date
                         ui.add_space(7.0);
                         ui.horizontal(|ui| {
                             ui.add_space(4.0);
@@ -1253,7 +1194,7 @@ impl BloomApp {
                                     RichText::new(tile_title)
                                         .font(font_id(ui, 14.5, TwoUiFontWeight::SemiBold))
                                         .color(if is_locked {
-                                            p.text_secondary
+                                            p.text_disabled
                                         } else {
                                             p.text_primary
                                         }),
@@ -1261,7 +1202,11 @@ impl BloomApp {
                                 ui.label(
                                     RichText::new(build_date)
                                         .font(font_id(ui, 12.5, TwoUiFontWeight::Regular))
-                                        .color(p.text_muted),
+                                        .color(if is_locked {
+                                            p.text_disabled
+                                        } else {
+                                            p.text_muted
+                                        }),
                                 );
                             });
                         });
@@ -1270,9 +1215,54 @@ impl BloomApp {
             });
         }
 
-        if let Some(build) = clicked_build {
-            self.selected_grid_build = Some(build);
-            self.build_detail_sheet_open = true;
+        if let Some(action) = clicked_card {
+            match action {
+                ClickedCard::OpenInfo(build) => {
+                    self.open_firmware_info(build, ui.ctx());
+                }
+                ClickedCard::ConfirmLocked(build) => {
+                    self.lower_binary_dialog_device_name = connected_match
+                        .map(|c| c.display_title().to_owned())
+                        .unwrap_or_else(|| dev.display_label());
+                    self.lower_binary_dialog_target_build = Some(build);
+                    self.lower_binary_ack_draft = false;
+                    self.lower_binary_dialog_open = true;
+                }
+            }
+        }
+    }
+
+    pub fn render_lower_binary_dialog(&mut self, ctx: &egui::Context) {
+        if !self.lower_binary_dialog_open {
+            return;
+        }
+        let body = format!(
+            "The binary version of {} is higher than this firmware. Installing it will be rejected by the device.\n\nAre you sure you want to continue?",
+            self.lower_binary_dialog_device_name
+        );
+
+        if let Some(idx) = TwoUiDialog::new("bloom_lower_binary_dialog", "Lower binary version")
+            .body(&body)
+            .width(400.0)
+            .single_choice_option(&mut self.lower_binary_ack_draft, "I know what I'm doing")
+            .action(DialogAction::cancel("Cancel"))
+            .action(DialogAction::primary("OK"))
+            .show(ctx, &mut self.lower_binary_dialog_open, |_| {})
+        {
+            if idx == 1 {
+                if self.lower_binary_ack_draft {
+                    self.config.allow_lower_binary = true;
+                    if let Some(build) = self.lower_binary_dialog_target_build.take() {
+                        self.open_firmware_info(build, ctx);
+                    }
+                } else {
+                    self.lower_binary_dialog_open = true;
+                }
+            } else {
+                self.lower_binary_dialog_target_build = None;
+            }
+        } else if !self.lower_binary_dialog_open {
+            self.lower_binary_dialog_target_build = None;
         }
     }
 
@@ -1302,176 +1292,5 @@ impl BloomApp {
             region.code.clone(),
             lang,
         );
-    }
-
-    pub fn render_build_detail_sheet(&mut self, ctx: &egui::Context) {
-        let Some(item) = self.selected_grid_build.clone() else {
-            self.build_detail_sheet_open = false;
-            return;
-        };
-        if !self.build_detail_sheet_open {
-            return;
-        }
-
-        let connected_devices = self
-            .shared
-            .lock()
-            .map(|g| g.connected_devices.clone())
-            .unwrap_or_default();
-        let model_code = self
-            .selected_my_device
-            .as_ref()
-            .map(|d| d.model.clone())
-            .unwrap_or_else(|| self.config.model.clone());
-        let region_code = self
-            .selected_my_region
-            .as_ref()
-            .map(|r| r.code.clone())
-            .unwrap_or_else(|| self.config.csc.clone());
-
-        let installed_build = installed_build_for_model(&connected_devices, &model_code);
-        let installed_bit = installed_build
-            .as_deref()
-            .and_then(DecodedBuildCode::decode)
-            .map(|d| d.bootloader_level);
-        let decoded = item.decoded_build();
-        let is_now = installed_build
-            .as_deref()
-            .is_some_and(|cur| item.build.eq_ignore_ascii_case(cur));
-        let is_locked = installed_bit.is_some_and(|cur_bit| {
-            decoded
-                .as_ref()
-                .is_some_and(|d| d.is_downgrade_blocked(cur_bit))
-        });
-
-        let theme = theme_from_ctx(ctx);
-        let p = &theme.palette;
-        let sheet_title = format_firmware_tile_title(
-            item.one_ui_version.as_deref(),
-            item.android_version.as_deref(),
-        );
-        let build_date = format_tile_date(&item);
-        let sec_patch = item
-            .changelog
-            .as_ref()
-            .and_then(|c| c.sec_patch.as_deref())
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-
-        let mut open_decrypt = false;
-        let mut copy_fw = false;
-
-        TwoUiBottomSheet::new("browse_build_detail", &sheet_title)
-            .max_width(560.0)
-            .max_height(500.0)
-            .show(ctx, &mut self.build_detail_sheet_open, |ui| {
-                ui.spacing_mut().item_spacing.y = 10.0;
-
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                    if is_now {
-                        pill_tag(ui, "Now", p.primary, p.on_primary);
-                    }
-                    if let Some(ref d) = decoded {
-                        match d.update_type {
-                            FirmwareUpdateType::Feature => {
-                                pill_tag(ui, "Feature", p.selected_bg, p.primary_high);
-                            }
-                            FirmwareUpdateType::Security => {
-                                pill_tag(
-                                    ui,
-                                    "Security",
-                                    p.functional_green.gamma_multiply(0.18),
-                                    p.functional_green,
-                                );
-                            }
-                            FirmwareUpdateType::Other(ch) => {
-                                pill_tag(ui, &ch.to_string(), p.tone_on_tone, p.text_secondary);
-                            }
-                        }
-                        let (bit_bg, bit_fg) = if is_locked {
-                            (p.functional_red.gamma_multiply(0.18), p.functional_red)
-                        } else if installed_bit.is_some() {
-                            (p.functional_green.gamma_multiply(0.18), p.functional_green)
-                        } else {
-                            (p.tone_on_tone, p.text_primary)
-                        };
-                        pill_tag(
-                            ui,
-                            &format!("Bit {} ({})", d.bootloader_bit, d.bootloader_level),
-                            bit_bg,
-                            bit_fg,
-                        );
-                        if let Some(rev) = d.revision {
-                            pill_tag(ui, &format!("Rev {rev}"), p.tone_on_tone, p.text_secondary);
-                        }
-                        pill_tag(ui, &d.region_group, p.tone_on_tone, p.text_muted);
-                    }
-                });
-
-                CardSection::new()
-                    .fill(p.surface_container)
-                    .inner_margin(Margin::symmetric(0, 4))
-                    .show(ui, |ui| {
-                        key_value_row(ui, "Build", &item.build, true);
-                        paint_divider(ui, DividerInset::Standard);
-                        key_value_row(ui, "Date", &build_date, false);
-                        if let Some(patch) = sec_patch {
-                            paint_divider(ui, DividerInset::Standard);
-                            key_value_row(ui, "Patch", patch, false);
-                        }
-                        paint_divider(ui, DividerInset::Standard);
-                        key_value_row(ui, "Full", &item.firmware, false);
-                    });
-
-                if let Some(notes) = item
-                    .changelog
-                    .as_ref()
-                    .and_then(|c| c.notes.as_deref())
-                    .filter(|s| !s.trim().is_empty())
-                {
-                    Frame::NONE
-                        .fill(p.surface_container)
-                        .corner_radius(CornerRadius::same(16))
-                        .inner_margin(Margin::symmetric(14, 12))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width().max(120.0));
-                            ui.label(
-                                RichText::new(notes)
-                                    .font(font_id(ui, 13.5, TwoUiFontWeight::Regular))
-                                    .color(p.text_primary),
-                            );
-                        });
-                }
-
-                ui.add_space(4.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
-                    if ui
-                        .add(
-                            TwoUiButton::contained_primary("Decrypt")
-                                .icon(TwoUiIcon::SecurityOutline),
-                        )
-                        .clicked()
-                    {
-                        open_decrypt = true;
-                    }
-                    if ui
-                        .add(TwoUiButton::outline("Copy").icon(TwoUiIcon::Copy))
-                        .clicked()
-                    {
-                        copy_fw = true;
-                    }
-                });
-            });
-
-        if copy_fw {
-            ctx.copy_text(item.firmware.clone());
-            self.toast.show_message(ctx, "Copied", 1.8);
-        }
-        if open_decrypt {
-            self.build_detail_sheet_open = false;
-            self.load_build_into_decrypt(model_code, region_code, item.firmware, ctx);
-        }
     }
 }

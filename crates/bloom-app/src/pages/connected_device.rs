@@ -869,31 +869,6 @@ impl BloomApp {
                     }
                 });
         }
-
-        // Quick build actions
-        if let Some(full_fw) = dev.full_firmware_string() {
-            ui.add_space(14.0);
-            let mut do_copy = false;
-            let mut do_decrypt = false;
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(10.0, 8.0);
-                if ui.add(TwoUiButton::new("Copy Build")).clicked() {
-                    do_copy = true;
-                }
-                if ui.add(TwoUiButton::new("Decrypt")).clicked() {
-                    do_decrypt = true;
-                }
-            });
-
-            if do_copy {
-                ui.ctx().copy_text(full_fw.clone());
-                self.toast.show_message(ui.ctx(), "Copied", 1.8);
-            }
-            if do_decrypt {
-                let region = self.effective_device_csc(dev);
-                self.load_build_into_decrypt(dev.model.clone(), region, full_fw, ui.ctx());
-            }
-        }
     }
 
     pub fn render_whats_new_dialog(

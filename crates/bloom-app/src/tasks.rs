@@ -13,7 +13,8 @@ use bloom_core::{
 };
 
 use crate::state::{
-    derive_decrypted_output, DecryptForm, DeviceRenderState, SharedUiState, SnackAction,
+    derive_decrypted_output, DecryptForm, DeviceRenderState, FirmwareBinaryInfoState,
+    SharedUiState, SnackAction,
 };
 
 pub fn spawn_manual_decrypt(
@@ -618,5 +619,62 @@ pub fn spawn_connect_wireless_device(
             }
             ctx.request_repaint();
         }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_fetch_firmware_binary_info(
+    rt: &tokio::runtime::Runtime,
+    shared: Arc<Mutex<SharedUiState>>,
+    imei_db: Arc<ImeiDb>,
+    ctx: egui::Context,
+    cache_key: String,
+    fw: String,
+    model: String,
+    csc: String,
+    custom_imei: Option<String>,
+    allow_mismatch: bool,
+) {
+    if let Ok(mut guard) = shared.lock() {
+        if matches!(
+            guard.firmware_binary_info.get(&cache_key),
+            Some(FirmwareBinaryInfoState::Loading)
+        ) {
+            return;
+        }
+        guard
+            .firmware_binary_info
+            .insert(cache_key.clone(), FirmwareBinaryInfoState::Loading);
+    }
+    ctx.request_repaint();
+
+    rt.spawn(async move {
+        let model_upper = model.trim().to_ascii_uppercase();
+        let csc_upper = csc.trim().to_ascii_uppercase();
+        let fw_upper = fw.trim().to_ascii_uppercase();
+        let imei_opt = custom_imei
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let result = resolve_binary_with_fallback(
+            &fw_upper,
+            &model_upper,
+            &csc_upper,
+            imei_opt,
+            &imei_db,
+            allow_mismatch,
+        )
+        .await;
+
+        let next_state = match result {
+            Ok((_, info)) => FirmwareBinaryInfoState::Ready(info),
+            Err(err) => FirmwareBinaryInfoState::Unavailable(err.to_string()),
+        };
+
+        if let Ok(mut guard) = shared.lock() {
+            guard.firmware_binary_info.insert(cache_key, next_state);
+        }
+        ctx.request_repaint();
     });
 }

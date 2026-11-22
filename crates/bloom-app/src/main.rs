@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod firmware_info;
 mod pages;
 mod state;
 mod tasks;
@@ -185,7 +186,11 @@ pub struct BloomApp {
     pub default_region_dialog_pending: Option<(GalaxyDevice, CscItem)>,
     pub default_region_dont_ask_draft: bool,
     pub selected_grid_build: Option<HistoryItem>,
-    pub build_detail_sheet_open: bool,
+    pub firmware_info_open: bool,
+    pub lower_binary_dialog_open: bool,
+    pub lower_binary_dialog_device_name: String,
+    pub lower_binary_dialog_target_build: Option<HistoryItem>,
+    pub lower_binary_ack_draft: bool,
 
     // Connected device split-pane state
     pub device_right_pane: DeviceRightPane,
@@ -307,7 +312,11 @@ impl BloomApp {
             default_region_dialog_pending: None,
             default_region_dont_ask_draft: false,
             selected_grid_build: None,
-            build_detail_sheet_open: false,
+            firmware_info_open: false,
+            lower_binary_dialog_open: false,
+            lower_binary_dialog_device_name: String::new(),
+            lower_binary_dialog_target_build: None,
+            lower_binary_ack_draft: false,
 
             device_right_pane: DeviceRightPane::Info,
             device_region_query: String::new(),
@@ -383,6 +392,7 @@ impl BloomApp {
         );
     }
 
+    #[allow(dead_code)]
     pub fn load_build_into_decrypt(
         &mut self,
         model: String,
@@ -470,12 +480,13 @@ impl eframe::App for BloomApp {
         let theme = theme_from_ui(ui);
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (is_busy, db_syncing, update_checking, pairing_busy, connected_devices): (
+        let (is_busy, db_syncing, update_checking, pairing_busy, connected_devices, device_has_update): (
             bool,
             bool,
             bool,
             bool,
             Vec<ConnectedSamsungDevice>,
+            Vec<bool>,
         ) = match self.shared.lock() {
             Ok(g) => (
                 g.is_busy(),
@@ -483,8 +494,16 @@ impl eframe::App for BloomApp {
                 g.device_updates.values().any(|u| u.loading),
                 g.wireless_pair.pairing || g.wireless_pair.connecting,
                 g.connected_devices.clone(),
+                g.connected_devices
+                    .iter()
+                    .map(|d| {
+                        g.device_updates
+                            .get(&d.device_id)
+                            .is_some_and(|u| u.checked && u.update_available)
+                    })
+                    .collect(),
             ),
-            Err(_) => (false, false, false, false, Vec::new()),
+            Err(_) => (false, false, false, false, Vec::new(), Vec::new()),
         };
 
         if is_busy || db_syncing || update_checking || pairing_busy {
@@ -526,26 +545,22 @@ impl eframe::App for BloomApp {
             self.page_id = BloomPage::Browse.id();
         }
 
-        let device_badges: Vec<Option<String>> = connected_devices
-            .iter()
-            .map(|d| d.battery_percent.map(|p| format!("{p}%")))
-            .collect();
-
         let mut entries: Vec<DrawerEntry<'_>> = Vec::with_capacity(connected_devices.len() + 7);
         for (idx, dev) in connected_devices.iter().enumerate() {
             let entry_id = CONNECTED_DEVICE_PAGE_BASE + idx;
-            let entry = match device_badges[idx].as_deref() {
-                Some(badge) => DrawerEntry::with_badge(
+            let entry = if device_has_update.get(idx).copied().unwrap_or(false) {
+                DrawerEntry::with_badge(
                     entry_id,
                     dev.display_title(),
                     TwoUiIcon::DeviceOutline,
-                    badge,
-                ),
-                None => DrawerEntry::item(
+                    "Update",
+                )
+            } else {
+                DrawerEntry::item(
                     entry_id,
                     dev.display_title(),
                     TwoUiIcon::DeviceOutline,
-                ),
+                )
             };
             entries.push(entry);
         }
@@ -686,8 +701,9 @@ impl eframe::App for BloomApp {
                 }
             });
 
-        // Browse dialogs & build detail bottom sheet
-        self.render_build_detail_sheet(ui.ctx());
+        // Browse dialogs & custom FirmwareInfo modal
+        self.render_firmware_info_modal(ui.ctx());
+        self.render_lower_binary_dialog(ui.ctx());
         self.render_default_region_dialog(ui.ctx());
         self.render_settings_region_dialog(ui.ctx());
 

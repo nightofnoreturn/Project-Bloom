@@ -87,6 +87,7 @@ pub struct AppConfig {
     pub decrypt_after_download: bool,
     pub delete_encrypted: bool,
     pub allow_mismatch: bool,
+    pub allow_lower_binary: bool,
     pub dark_mode: bool,
     pub follow_system: bool,
     pub backdrop_blur: bool,
@@ -111,6 +112,7 @@ impl Default for AppConfig {
             decrypt_after_download: true,
             delete_encrypted: false,
             allow_mismatch: false,
+            allow_lower_binary: false,
             dark_mode: true,
             follow_system: true,
             backdrop_blur: true,
@@ -210,6 +212,13 @@ pub enum DeviceRenderState {
     Unavailable,
 }
 
+#[derive(Debug, Clone)]
+pub enum FirmwareBinaryInfoState {
+    Loading,
+    Ready(bloom_core::BinaryFileInfo),
+    Unavailable(String),
+}
+
 #[derive(Debug, Default)]
 pub struct SharedUiState {
     pub decrypting: bool,
@@ -217,6 +226,7 @@ pub struct SharedUiState {
     pub connected_devices: Vec<ConnectedSamsungDevice>,
     pub device_renders: HashMap<String, DeviceRenderState>,
     pub device_updates: HashMap<String, DeviceUpdateState>,
+    pub firmware_binary_info: HashMap<String, FirmwareBinaryInfoState>,
     pub wireless_pair: WirelessPairState,
     pub device_db_syncing: bool,
     pub device_db_error: Option<String>,
@@ -293,6 +303,7 @@ pub fn format_firmware_tile_title(one_ui: Option<&str>, android: Option<&str>) -
 }
 
 /// Extracts the central emblem text for the firmware grid tile (`"9"`, `"8.5"`, or `"A14"`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_emblem_text(one_ui: Option<&str>, android: Option<&str>) -> String {
     if let Some(oui) = one_ui.map(str::trim).filter(|s| !s.is_empty()) {
         if let Some(ver) = oui.split_whitespace().last() {

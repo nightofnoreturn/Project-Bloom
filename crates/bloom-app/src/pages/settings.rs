@@ -324,6 +324,14 @@ impl BloomApp {
                     .enabled(!is_busy)
                     .show(ui);
 
+                SwitchItem::new(
+                    &mut self.config.allow_lower_binary,
+                    "Allow lower binary firmware",
+                )
+                .top_divider(true)
+                .enabled(!is_busy)
+                .show(ui);
+
                 paint_divider(ui, DividerInset::WithLeading);
                 Frame::NONE
                     .inner_margin(Margin::symmetric(20, 12))
