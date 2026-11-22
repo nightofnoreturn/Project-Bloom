@@ -1,6 +1,6 @@
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 use aes::cipher::{Array, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::Aes128;
@@ -417,6 +417,222 @@ where
     Ok(processed)
 }
 
+const ECB_STREAM_CACHE_SIZE: usize = 64 * 1024;
+
+/// Streaming random-access `Read + Seek` adapter that decrypts AES-128-ECB blocks on the fly
+/// so encrypted Samsung `.enc4`/`.enc2` archives can be extracted directly without writing a
+/// temporary multi-gigabyte `.zip` file to disk.
+pub struct Aes128EcbReadSeek<R: Read + Seek> {
+    inner: R,
+    cipher: Aes128,
+    logical_len: u64,
+    pos: u64,
+    cache_start: u64,
+    cache: Vec<u8>,
+}
+
+impl<R: Read + Seek> Aes128EcbReadSeek<R> {
+    pub fn new(mut inner: R, key: &[u8; 16]) -> Result<Self> {
+        let raw_len = inner.seek(SeekFrom::End(0))?;
+        if raw_len == 0 || raw_len % 16 != 0 {
+            return Err(BloomError::Crypto(format!(
+                "encrypted archive size ({raw_len} bytes) must be a non-zero multiple of 16 bytes"
+            )));
+        }
+        let cipher = Aes128::new(&Array::from(*key));
+        let logical_len = detect_zip_logical_len(&mut inner, &cipher, raw_len)?;
+        inner.seek(SeekFrom::Start(0))?;
+
+        Ok(Self {
+            inner,
+            cipher,
+            logical_len,
+            pos: 0,
+            cache_start: u64::MAX,
+            cache: Vec::new(),
+        })
+    }
+
+    fn fill_cache_for(&mut self, offset: u64) -> io::Result<()> {
+        let chunk_sz = ECB_STREAM_CACHE_SIZE as u64;
+        let aligned_start = (offset / chunk_sz) * chunk_sz;
+        let raw_total = self.inner.seek(SeekFrom::End(0))?;
+        let to_read = (chunk_sz.min(raw_total.saturating_sub(aligned_start))) as usize;
+        if to_read == 0 {
+            self.cache.clear();
+            self.cache_start = aligned_start;
+            return Ok(());
+        }
+
+        self.inner.seek(SeekFrom::Start(aligned_start))?;
+        self.cache.resize(to_read, 0);
+        let actual = read_exact_or_eof(&mut self.inner, &mut self.cache)?;
+        let aligned_actual = actual - (actual % 16);
+        self.cache.truncate(aligned_actual);
+
+        for block_slice in self.cache.as_chunks_mut::<16>().0 {
+            let mut block = Array::from(*block_slice);
+            self.cipher.decrypt_block(&mut block);
+            block_slice.copy_from_slice(&block);
+        }
+        self.cache_start = aligned_start;
+        Ok(())
+    }
+}
+
+fn detect_zip_logical_len<R: Read + Seek>(
+    inner: &mut R,
+    cipher: &Aes128,
+    raw_len: u64,
+) -> Result<u64> {
+    const EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
+    let window_raw = raw_len.min(66 * 1024);
+    let tail_start = (raw_len - window_raw) & !15;
+    let tail_len = (raw_len - tail_start) as usize;
+    if tail_len < 22 {
+        return Ok(raw_len);
+    }
+
+    inner.seek(SeekFrom::Start(tail_start))?;
+    let mut tail = vec![0u8; tail_len];
+    let n = read_exact_or_eof(inner, &mut tail)?;
+    let aligned_n = n - (n % 16);
+    tail.truncate(aligned_n);
+
+    for block_slice in tail.as_chunks_mut::<16>().0 {
+        let mut block = Array::from(*block_slice);
+        cipher.decrypt_block(&mut block);
+        block_slice.copy_from_slice(&block);
+    }
+
+    if tail.len() >= 22 {
+        for i in (0..=tail.len() - 22).rev() {
+            if tail[i..i + 4] == EOCD_SIG {
+                let comment_len = u16::from_le_bytes([tail[i + 20], tail[i + 21]]) as usize;
+                let end_in_tail = i + 22 + comment_len;
+                if end_in_tail <= tail.len() {
+                    let trailing = tail.len() - end_in_tail;
+                    if trailing <= 16 {
+                        return Ok(tail_start + end_in_tail as u64);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(raw_len)
+}
+
+impl<R: Read + Seek> Read for Aes128EcbReadSeek<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() || self.pos >= self.logical_len {
+            return Ok(0);
+        }
+
+        let max_avail = (self.logical_len - self.pos).min(out.len() as u64) as usize;
+        let in_cache = self.cache_start <= self.pos
+            && self.pos < self.cache_start.saturating_add(self.cache.len() as u64);
+        if !in_cache {
+            self.fill_cache_for(self.pos)?;
+        }
+
+        let cache_end = self.cache_start.saturating_add(self.cache.len() as u64);
+        if self.pos >= cache_end {
+            return Ok(0);
+        }
+
+        let start_idx = (self.pos - self.cache_start) as usize;
+        let copy_len = max_avail.min(self.cache.len() - start_idx);
+        out[..copy_len].copy_from_slice(&self.cache[start_idx..start_idx + copy_len]);
+        self.pos += copy_len as u64;
+        Ok(copy_len)
+    }
+}
+
+impl<R: Read + Seek> Seek for Aes128EcbReadSeek<R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let next = match pos {
+            SeekFrom::Start(v) => v as i128,
+            SeekFrom::Current(delta) => self.pos as i128 + i128::from(delta),
+            SeekFrom::End(delta) => self.logical_len as i128 + i128::from(delta),
+        };
+        if next < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot seek before start of decrypted archive",
+            ));
+        }
+        self.pos = next as u64;
+        Ok(self.pos)
+    }
+}
+
+/// Streams and extracts a Samsung `.enc4`/`.enc2` firmware archive directly into `output_dir`
+/// without creating an intermediate `.zip` file on disk.
+pub fn extract_encrypted_to_folder<F>(
+    input_path: &Path,
+    output_dir: &Path,
+    key: &[u8; 16],
+    mut on_progress: F,
+) -> Result<Vec<PathBuf>>
+where
+    F: FnMut(u64, u64),
+{
+    let file = File::open(input_path)?;
+    let stream = Aes128EcbReadSeek::new(file, key)?;
+    let mut archive = zip::ZipArchive::new(stream)
+        .map_err(|e| BloomError::Crypto(format!("invalid encrypted firmware zip: {e}")))?;
+
+    fs::create_dir_all(output_dir)?;
+
+    let mut total_uncompressed = 0u64;
+    for i in 0..archive.len() {
+        if let Ok(entry) = archive.by_index(i) {
+            if !entry.is_dir() {
+                total_uncompressed = total_uncompressed.saturating_add(entry.size());
+            }
+        }
+    }
+
+    let mut extracted = Vec::new();
+    let mut extracted_bytes = 0u64;
+    let mut buf = vec![0u8; DECRYPT_CHUNK_SIZE];
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| BloomError::Crypto(format!("zip entry error: {e}")))?;
+        let Some(rel_path) = entry.enclosed_name() else {
+            continue;
+        };
+        let target = output_dir.join(rel_path);
+        if entry.is_dir() {
+            fs::create_dir_all(&target)?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let out_file = File::create(&target)?;
+        let mut writer = BufWriter::with_capacity(DECRYPT_CHUNK_SIZE, out_file);
+        loop {
+            let n = entry.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n])?;
+            extracted_bytes = extracted_bytes.saturating_add(n as u64);
+            on_progress(extracted_bytes, total_uncompressed.max(extracted_bytes));
+        }
+        writer.flush()?;
+        extracted.push(target);
+    }
+
+    on_progress(total_uncompressed, total_uncompressed);
+    Ok(extracted)
+}
+
 fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
@@ -493,5 +709,45 @@ mod tests {
             decrypt_file_parallel(&enc_path, &dec_path, &key, |_, _| {}).expect("decrypt");
         assert_eq!(decrypted_bytes, plaintext.len() as u64);
         assert_eq!(std::fs::read(&dec_path).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn streams_encrypted_zip_directly_to_folder_with_padding() {
+        use zip::write::SimpleFileOptions;
+
+        let dir = tempdir().unwrap();
+        let enc_path = dir.path().join("fw.zip.enc4");
+        let out_dir = dir.path().join("extracted");
+
+        let mut zip_buf = io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut zip_buf);
+            writer
+                .start_file("AP_sample.tar.md5", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"hello-samsung-firmware").unwrap();
+            writer.finish().unwrap();
+        }
+
+        let mut plain_zip = zip_buf.into_inner();
+        let pad_len = 16 - (plain_zip.len() % 16);
+        plain_zip.extend(std::iter::repeat_n(pad_len as u8, pad_len));
+
+        let key = key_from_string("stream-extract-key");
+        let cipher = Aes128::new(&Array::from(key));
+        for chunk in plain_zip.as_chunks_mut::<16>().0 {
+            let mut block = Array::from(*chunk);
+            cipher.encrypt_block(&mut block);
+            chunk.copy_from_slice(&block);
+        }
+        std::fs::write(&enc_path, &plain_zip).unwrap();
+
+        let files = extract_encrypted_to_folder(&enc_path, &out_dir, &key, |_, _| {})
+            .expect("direct extract should succeed");
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            std::fs::read(out_dir.join("AP_sample.tar.md5")).unwrap(),
+            b"hello-samsung-firmware"
+        );
     }
 }

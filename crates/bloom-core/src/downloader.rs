@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify, RwLock};
 
-use crate::crypto::{decrypt_file_parallel, get_v2_key, verify_file_single_pass};
+use crate::crypto::{
+    decrypt_file_parallel, extract_encrypted_to_folder, get_v2_key, verify_file_single_pass,
+};
 use crate::data::BinaryFileInfo;
 use crate::error::{BloomError, Result};
 use crate::fus::{FusClient, PreparedDownload};
@@ -33,6 +35,7 @@ pub enum JobStage {
     Downloading,
     Verifying,
     Decrypting,
+    Extracting,
     Completed,
 }
 
@@ -57,6 +60,8 @@ pub struct DownloadOptions {
     pub verify_checksums: bool,
     pub decrypt_after_download: bool,
     pub delete_encrypted_after_decrypt: bool,
+    /// Stream-extract directly to a folder during decryption instead of writing a `.zip`.
+    pub extract_to_folder: bool,
 }
 
 impl Default for DownloadOptions {
@@ -68,22 +73,40 @@ impl Default for DownloadOptions {
             verify_checksums: true,
             decrypt_after_download: true,
             delete_encrypted_after_decrypt: false,
+            extract_to_folder: true,
         }
     }
 }
 
-/// External handle to gracefully pause or cancel an active download without losing progress.
+/// External handle to gracefully pause, cancel, or adjust speed limit on an active download.
 #[derive(Debug, Clone, Default)]
 pub struct DownloadHandle {
     paused: Arc<AtomicBool>,
     canceled: Arc<AtomicBool>,
     aborted: Arc<AtomicBool>,
+    speed_limit_bps: Arc<AtomicU64>,
     notify: Arc<Notify>,
 }
 
 impl DownloadHandle {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set or clear the runtime download speed limit (in bytes/sec; `None` = unlimited).
+    pub fn set_speed_limit_bps(&self, limit: Option<u64>) {
+        let val = limit.map(|v| v.max(1024)).unwrap_or(0);
+        self.speed_limit_bps.store(val, Ordering::SeqCst);
+    }
+
+    /// Current speed limit in bytes per second (`None` = unlimited).
+    pub fn speed_limit_bps(&self) -> Option<u64> {
+        let val = self.speed_limit_bps.load(Ordering::SeqCst);
+        (val > 0).then_some(val)
+    }
+
+    fn speed_limit_atomic(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.speed_limit_bps)
     }
 
     /// Request a graceful pause; partial data and `.bloom-state.json` remain intact on disk.
@@ -153,32 +176,37 @@ pub struct DownloadStateFile {
 pub struct DownloadOutcome {
     pub encrypted_path: PathBuf,
     pub decrypted_path: Option<PathBuf>,
+    pub extracted_dir: Option<PathBuf>,
     pub resumed_from_bytes: u64,
     pub total_bytes: u64,
 }
 
 struct TokenBucket {
-    rate_bps: u64,
+    rate_bps: Arc<AtomicU64>,
     state: Mutex<(f64, Instant)>,
 }
 
 impl TokenBucket {
-    fn new(rate_bps: u64) -> Self {
-        let rate = rate_bps.max(1024);
+    fn new(rate_bps: Arc<AtomicU64>) -> Self {
+        let initial = rate_bps.load(Ordering::Relaxed).max(1024) as f64;
         Self {
-            rate_bps: rate,
-            state: Mutex::new((rate as f64, Instant::now())),
+            rate_bps,
+            state: Mutex::new((initial, Instant::now())),
         }
     }
 
     async fn acquire(&self, bytes: usize) {
         let needed = bytes as f64;
         loop {
+            let current_rate = self.rate_bps.load(Ordering::Relaxed);
+            if current_rate == 0 {
+                return;
+            }
+            let rate = current_rate.max(1024) as f64;
             let wait_dur = {
                 let mut guard = self.state.lock().await;
                 let now = Instant::now();
                 let elapsed = now.duration_since(guard.1).as_secs_f64();
-                let rate = self.rate_bps as f64;
                 let max_burst = rate.max(128.0 * 1024.0);
                 guard.0 = (guard.0 + elapsed * rate).min(max_burst);
                 guard.1 = now;
@@ -188,7 +216,7 @@ impl TokenBucket {
                     None
                 } else {
                     let deficit = needed - guard.0;
-                    Some(Duration::from_secs_f64((deficit / rate).min(1.0)))
+                    Some(Duration::from_secs_f64((deficit / rate).min(0.25)))
                 }
             };
 
@@ -223,7 +251,7 @@ struct SharedState {
     downloaded_bytes: AtomicU64,
     active_connections: AtomicUsize,
     handle: DownloadHandle,
-    limiter: Option<Arc<TokenBucket>>,
+    limiter: Arc<TokenBucket>,
 }
 
 impl SharedState {
@@ -546,6 +574,10 @@ where
 {
     tokio::fs::create_dir_all(&options.output_dir).await?;
 
+    if options.speed_limit_bps.is_some() {
+        handle.set_speed_limit_bps(options.speed_limit_bps);
+    }
+
     let (enc_name, dec_name) = derive_output_filenames(&info.file_name, fw, region);
     let enc_path = options.output_dir.join(&enc_name);
     let part_path = part_path_for(&enc_path);
@@ -640,7 +672,7 @@ where
             downloaded_bytes: AtomicU64::new(resumed_from_bytes),
             active_connections: AtomicUsize::new(0),
             handle: handle.clone(),
-            limiter: options.speed_limit_bps.map(|bps| Arc::new(TokenBucket::new(bps))),
+            limiter: Arc::new(TokenBucket::new(handle.speed_limit_atomic())),
         });
 
         let flush_shared = Arc::clone(&shared);
@@ -780,26 +812,14 @@ where
             )
         });
 
-        while let Some((cur, max)) = v_rx.recv().await {
-            on_progress(ProgressSnapshot {
-                stage: JobStage::Verifying,
-                current_bytes: cur,
-                total_bytes: max,
-                bytes_per_sec: 0,
-                active_connections: 0,
-                segments: Vec::new(),
-            });
-        }
+        pump_stage_progress(JobStage::Verifying, &mut v_rx, &mut on_progress).await;
 
         verify_task
             .await
             .map_err(|e| BloomError::Crypto(format!("verify task join error: {e}")))??;
     }
 
-    let decrypted_path = if options.decrypt_after_download {
-        state_file.stage = JobStage::Decrypting;
-        write_state_atomic(&state_path, &state_file).await?;
-
+    let (decrypted_path, extracted_dir) = if options.decrypt_after_download {
         let key = if enc_name.ends_with(".enc2") {
             get_v2_key(fw, model, region).0
         } else {
@@ -809,52 +829,67 @@ where
                 .ok_or_else(|| BloomError::Crypto("missing v4 decryption key from Samsung".into()))?
         };
 
-        let in_path = enc_path.clone();
-        let out_path = dec_path.clone();
-        let (d_tx, mut d_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+        if options.extract_to_folder {
+            state_file.stage = JobStage::Extracting;
+            write_state_atomic(&state_path, &state_file).await?;
 
-        let decrypt_task = tokio::task::spawn_blocking(move || {
-            let mut last_emit = Instant::now();
-            decrypt_file_parallel(&in_path, &out_path, &key, |cur, max| {
-                if cur == max || last_emit.elapsed() >= Duration::from_millis(200) {
-                    last_emit = Instant::now();
-                    let _ = d_tx.send((cur, max));
-                }
-            })
-        });
+            let folder_stem = dec_name.strip_suffix(".zip").unwrap_or(&dec_name);
+            let out_dir = options.output_dir.join(folder_stem);
+            let in_path = enc_path.clone();
+            let dir_clone = out_dir.clone();
+            let (e_tx, mut e_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
 
-        let mut last_bytes = 0u64;
-        let mut last_tick = Instant::now();
-        while let Some((cur, max)) = d_rx.recv().await {
-            let now = Instant::now();
-            let elapsed = now.duration_since(last_tick).as_secs_f64();
-            let bps = if elapsed > 0.0 {
-                ((cur.saturating_sub(last_bytes)) as f64 / elapsed) as u64
-            } else {
-                0
-            };
-            last_bytes = cur;
-            last_tick = now;
-            on_progress(ProgressSnapshot {
-                stage: JobStage::Decrypting,
-                current_bytes: cur,
-                total_bytes: max,
-                bytes_per_sec: bps,
-                active_connections: 0,
-                segments: Vec::new(),
+            let extract_task = tokio::task::spawn_blocking(move || {
+                let mut last_emit = Instant::now();
+                extract_encrypted_to_folder(&in_path, &dir_clone, &key, |cur, max| {
+                    if cur == max || last_emit.elapsed() >= Duration::from_millis(200) {
+                        last_emit = Instant::now();
+                        let _ = e_tx.send((cur, max));
+                    }
+                })
             });
-        }
 
-        decrypt_task
-            .await
-            .map_err(|e| BloomError::Crypto(format!("decrypt task join error: {e}")))??;
+            pump_stage_progress(JobStage::Extracting, &mut e_rx, &mut on_progress).await;
 
-        if options.delete_encrypted_after_decrypt {
-            let _ = tokio::fs::remove_file(&enc_path).await;
+            extract_task
+                .await
+                .map_err(|e| BloomError::Crypto(format!("extract task join error: {e}")))??;
+
+            if options.delete_encrypted_after_decrypt {
+                let _ = tokio::fs::remove_file(&enc_path).await;
+            }
+            (None, Some(out_dir))
+        } else {
+            state_file.stage = JobStage::Decrypting;
+            write_state_atomic(&state_path, &state_file).await?;
+
+            let in_path = enc_path.clone();
+            let out_path = dec_path.clone();
+            let (d_tx, mut d_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+
+            let decrypt_task = tokio::task::spawn_blocking(move || {
+                let mut last_emit = Instant::now();
+                decrypt_file_parallel(&in_path, &out_path, &key, |cur, max| {
+                    if cur == max || last_emit.elapsed() >= Duration::from_millis(200) {
+                        last_emit = Instant::now();
+                        let _ = d_tx.send((cur, max));
+                    }
+                })
+            });
+
+            pump_stage_progress(JobStage::Decrypting, &mut d_rx, &mut on_progress).await;
+
+            decrypt_task
+                .await
+                .map_err(|e| BloomError::Crypto(format!("decrypt task join error: {e}")))??;
+
+            if options.delete_encrypted_after_decrypt {
+                let _ = tokio::fs::remove_file(&enc_path).await;
+            }
+            (Some(dec_path), None)
         }
-        Some(dec_path)
     } else {
-        None
+        (None, None)
     };
 
     let _ = tokio::fs::remove_file(&state_path).await;
@@ -871,9 +906,40 @@ where
     Ok(DownloadOutcome {
         encrypted_path: enc_path,
         decrypted_path,
+        extracted_dir,
         resumed_from_bytes,
         total_bytes: info.size,
     })
+}
+
+async fn pump_stage_progress<F>(
+    stage: JobStage,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<(u64, u64)>,
+    on_progress: &mut F,
+) where
+    F: FnMut(ProgressSnapshot),
+{
+    let mut last_bytes = 0u64;
+    let mut last_tick = Instant::now();
+    while let Some((cur, max)) = rx.recv().await {
+        let now = Instant::now();
+        let elapsed = now.duration_since(last_tick).as_secs_f64();
+        let bps = if elapsed > 0.0 {
+            ((cur.saturating_sub(last_bytes)) as f64 / elapsed) as u64
+        } else {
+            0
+        };
+        last_bytes = cur;
+        last_tick = now;
+        on_progress(ProgressSnapshot {
+            stage,
+            current_bytes: cur,
+            total_bytes: max,
+            bytes_per_sec: bps,
+            active_connections: 0,
+            segments: Vec::new(),
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1115,9 +1181,7 @@ async fn run_dynamic_worker(shared: Arc<SharedState>, worker_id: u32) -> Result<
                 ClaimResult::Granted(granted) => {
                     let n = granted as usize;
                     let slice = &chunk[..n];
-                    if let Some(ref limiter) = shared.limiter {
-                        limiter.acquire(slice.len()).await;
-                    }
+                    shared.limiter.acquire(slice.len()).await;
                     file.write_all(slice).await?;
                     shared.planner.lock().await.commit(worker_id, offset, granted);
                     shared.downloaded_bytes.fetch_add(granted, Ordering::Relaxed);
@@ -1259,5 +1323,22 @@ mod tests {
         prepare_part_file(&part, 65_536).await.unwrap();
         let meta = tokio::fs::metadata(&part).await.unwrap();
         assert_eq!(meta.len(), 65_536);
+    }
+
+    #[tokio::test]
+    async fn handle_live_speed_limit_updates() {
+        let handle = DownloadHandle::new();
+        assert_eq!(handle.speed_limit_bps(), None);
+
+        handle.set_speed_limit_bps(Some(512_000));
+        assert_eq!(handle.speed_limit_bps(), Some(512_000));
+
+        let bucket = TokenBucket::new(handle.speed_limit_atomic());
+        bucket.acquire(1024).await;
+
+        handle.set_speed_limit_bps(None);
+        assert_eq!(handle.speed_limit_bps(), None);
+        // Should return immediately without stalling when limit is cleared.
+        bucket.acquire(4 * 1024 * 1024).await;
     }
 }

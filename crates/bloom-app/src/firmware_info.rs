@@ -304,6 +304,7 @@ impl BloomApp {
             .order(Order::Foreground);
 
         let mut close_clicked = false;
+        let mut download_clicked = false;
         let modal_resp = Modal::new(Id::unique("bloom_firmware_info_modal"))
             .area(area)
             .backdrop_color(p.backdrop)
@@ -312,36 +313,32 @@ impl BloomApp {
                 ui.set_width(modal_w);
                 ui.spacing_mut().item_spacing.y = 14.0;
 
-                // Top header with X close button on top right
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
+                // Top header with title vertically aligned to the top-right close button
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), 36.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
                         ui.label(
-                            RichText::new("Firmware info")
+                            RichText::new("Firmware information")
                                 .font(font_id(ui, 19.0, TwoUiFontWeight::SemiBold))
                                 .color(p.text_primary),
                         );
-                        ui.label(
-                            RichText::new(format!("{model_code} · {region_code}"))
-                                .font(font_id(ui, 13.0, TwoUiFontWeight::Regular))
-                                .color(p.text_muted),
-                        );
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
-                                TwoUiIconButton::new(TwoUiIcon::Close)
-                                    .size(34.0)
-                                    .icon_size(16.0)
-                                    .tint(p.text_primary)
-                                    .tooltip("Close"),
-                            )
-                            .clicked()
-                        {
-                            close_clicked = true;
-                        }
-                    });
-                });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    TwoUiIconButton::new(TwoUiIcon::Close)
+                                        .size(34.0)
+                                        .icon_size(16.0)
+                                        .tint(p.text_primary)
+                                        .tooltip("Close"),
+                                )
+                                .clicked()
+                            {
+                                close_clicked = true;
+                            }
+                        });
+                    },
+                );
 
                 if is_loading {
                     ui.allocate_ui_with_layout(
@@ -390,13 +387,17 @@ impl BloomApp {
 
                     ui.add_space(2.0);
                     ui.vertical_centered(|ui| {
-                        // Download trigger intentionally left inert until Downloads navigation is designed.
-                        let _ = ui.add(TwoUiButton::contained_primary("Download"));
+                        if ui.add(TwoUiButton::contained_primary("Download")).clicked() {
+                            download_clicked = true;
+                        }
                     });
                 }
             });
 
-        if close_clicked
+        if download_clicked {
+            self.start_firmware_download(&item, &model_code, &region_code, ctx);
+            self.firmware_info_open = false;
+        } else if close_clicked
             || modal_resp.backdrop_response.clicked()
             || ctx.input(|i| i.key_pressed(egui::Key::Escape))
         {

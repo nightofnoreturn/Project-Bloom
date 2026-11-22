@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod download_window;
 mod firmware_info;
 mod pages;
 mod state;
@@ -19,10 +20,11 @@ use egui::{Frame, Id};
 use egui_twoui::prelude::*;
 
 use state::{
-    AppConfig, BloomPage, BrowseStep, DecryptForm, DeviceRightPane, SharedUiState, SnackAction,
-    CONNECTED_DEVICE_PAGE_BASE, STORAGE_KEY,
+    load_downloads_history, AppConfig, BloomPage, BrowseStep, DecryptForm, DeviceRightPane,
+    SharedUiState, SnackAction, CONNECTED_DEVICE_PAGE_BASE, STORAGE_KEY,
 };
 use tasks::{spawn_manual_decrypt, spawn_scan_adb_devices, spawn_sync_galaxy_db};
+use widgets::{handle_borderless_titlebar_drag, render_oneui_window_controls};
 
 static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
 
@@ -217,6 +219,8 @@ pub struct BloomApp {
     pub licenses_sheet_open: bool,
     pub settings_region_dialog_open: bool,
     pub settings_region_query: String,
+    pub downloads_search_open: bool,
+    pub downloads_search_query: String,
 
     // Navigation & global overlays
     pub page_id: usize,
@@ -257,6 +261,13 @@ impl BloomApp {
         );
 
         let mut initial_state = SharedUiState::default();
+        initial_state.completed_downloads = load_downloads_history();
+        initial_state.next_download_id = initial_state
+            .completed_downloads
+            .iter()
+            .map(|r| r.id)
+            .max()
+            .unwrap_or(0);
         let cache_path = default_device_cache_path();
         let needs_initial_sync = match load_galaxy_cache(&cache_path) {
             Some(cache) => {
@@ -340,6 +351,8 @@ impl BloomApp {
             licenses_sheet_open: false,
             settings_region_dialog_open: false,
             settings_region_query: String::new(),
+            downloads_search_open: false,
+            downloads_search_query: String::new(),
 
             page_id: BloomPage::Browse.id(),
             drawer_open: true,
@@ -480,15 +493,28 @@ impl eframe::App for BloomApp {
         let theme = theme_from_ui(ui);
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (is_busy, db_syncing, update_checking, pairing_busy, connected_devices, device_has_update): (
+        let (
+            is_busy,
+            db_syncing,
+            update_checking,
+            pairing_busy,
+            connected_devices,
+            device_has_update,
+            active_download_count,
+            newly_completed,
+            last_completed_output,
+        ): (
             bool,
             bool,
             bool,
             bool,
             Vec<ConnectedSamsungDevice>,
             Vec<bool>,
+            usize,
+            usize,
+            Option<std::path::PathBuf>,
         ) = match self.shared.lock() {
-            Ok(g) => (
+            Ok(mut g) => (
                 g.is_busy(),
                 g.device_db_syncing,
                 g.device_updates.values().any(|u| u.loading),
@@ -502,13 +528,47 @@ impl eframe::App for BloomApp {
                             .is_some_and(|u| u.checked && u.update_available)
                     })
                     .collect(),
+                g.active_downloads
+                    .iter()
+                    .filter(|j| !j.is_completed() && !j.canceled)
+                    .count(),
+                std::mem::take(&mut g.newly_completed_count),
+                g.last_completed_output.take(),
             ),
-            Err(_) => (false, false, false, false, Vec::new(), Vec::new()),
+            Err(_) => (
+                false,
+                false,
+                false,
+                false,
+                Vec::new(),
+                Vec::new(),
+                0,
+                0,
+                None,
+            ),
         };
 
-        if is_busy || db_syncing || update_checking || pairing_busy {
+        if is_busy || db_syncing || update_checking || pairing_busy || active_download_count > 0 {
             ui.ctx()
                 .request_repaint_after(Duration::from_millis(120));
+        }
+
+        if newly_completed > 0 {
+            let msg = if newly_completed == 1 {
+                "1 download has been completed".to_owned()
+            } else {
+                format!("{newly_completed} downloads have been completed")
+            };
+            if let Some(out_dir) = last_completed_output {
+                self.show_snackbar_with_action(
+                    ui.ctx(),
+                    msg,
+                    Some("Open folder"),
+                    SnackAction::OpenFolder(out_dir),
+                );
+            } else {
+                self.snackbar.show_message(ui.ctx(), msg, None::<&str>);
+            }
         }
 
         if self.last_usb_scan.elapsed() >= Duration::from_secs(3) {
@@ -545,7 +605,8 @@ impl eframe::App for BloomApp {
             self.page_id = BloomPage::Browse.id();
         }
 
-        let mut entries: Vec<DrawerEntry<'_>> = Vec::with_capacity(connected_devices.len() + 7);
+        let dl_badge = active_download_count.to_string();
+        let mut entries: Vec<DrawerEntry<'_>> = Vec::with_capacity(connected_devices.len() + 8);
         for (idx, dev) in connected_devices.iter().enumerate() {
             let entry_id = CONNECTED_DEVICE_PAGE_BASE + idx;
             let entry = if device_has_update.get(idx).copied().unwrap_or(false) {
@@ -575,6 +636,20 @@ impl eframe::App for BloomApp {
             BloomPage::Browse.title(),
             BloomPage::Browse.icon(),
         ));
+        entries.push(if active_download_count > 0 {
+            DrawerEntry::with_badge(
+                BloomPage::Downloads.id(),
+                BloomPage::Downloads.title(),
+                BloomPage::Downloads.icon(),
+                &dl_badge,
+            )
+        } else {
+            DrawerEntry::item(
+                BloomPage::Downloads.id(),
+                BloomPage::Downloads.title(),
+                BloomPage::Downloads.icon(),
+            )
+        });
         entries.push(DrawerEntry::item(
             BloomPage::Decrypt.id(),
             BloomPage::Decrypt.title(),
@@ -619,12 +694,16 @@ impl eframe::App for BloomApp {
             .filter(|&idx| idx < connected_devices.len() && connected_devices[idx].is_adb_ready());
 
         let current_page = BloomPage::from_id(self.page_id);
-        let page_title: String = if let Some(idx) = active_connected_idx {
-            connected_devices[idx].display_title().to_owned()
-        } else {
-            current_page.title().to_owned()
-        };
+        let (page_title, page_subtitle): (String, Option<String>) =
+            if let Some(idx) = active_connected_idx {
+                (connected_devices[idx].display_title().to_owned(), None)
+            } else if current_page == BloomPage::Downloads {
+                self.downloads_header_info()
+            } else {
+                (current_page.title().to_owned(), None)
+            };
 
+        let is_downloads_page = active_connected_idx.is_none() && current_page == BloomPage::Downloads;
         let is_decrypt_page = active_connected_idx.is_none() && current_page == BloomPage::Decrypt;
         let is_browse_page = active_connected_idx.is_none() && current_page == BloomPage::Browse;
         let show_browse_bottom_search = is_browse_page
@@ -639,16 +718,34 @@ impl eframe::App for BloomApp {
             },
         );
 
+        let mut toggle_dl_search = false;
         let panel_frame = Frame::NONE.fill(theme.palette.round_and_bg);
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ui, |ui| {
+                let panel_rect = ui.max_rect();
                 let scaffold_resp = TwoUiScaffold::new("bloom_scaffold", &page_title)
+                    .subtitle(page_subtitle.as_deref())
                     .nav_button(ScaffoldNavButton::DrawerMenu)
-                    .window_controls(true)
+                    .window_controls(false)
                     .show(
                         ui,
-                        |_toolbar_ui| {},
+                        |toolbar_ui| {
+                            if is_downloads_page
+                                && toolbar_ui
+                                    .add(
+                                        TwoUiIconButton::new(TwoUiIcon::Search)
+                                            .size(34.0)
+                                            .icon_size(15.0)
+                                            .tint(theme.palette.text_primary)
+                                            .tooltip("Search downloads"),
+                                    )
+                                    .clicked()
+                            {
+                                toggle_dl_search = true;
+                            }
+                            let _ = render_oneui_window_controls(toolbar_ui);
+                        },
                         |ui| {
                             if let Some(idx) = active_connected_idx {
                                 self.render_connected_device_page(ui, &connected_devices[idx]);
@@ -659,6 +756,7 @@ impl eframe::App for BloomApp {
                                     BloomPage::Settings => self.render_settings_page(ui),
                                     BloomPage::About => self.render_about_page(ui),
                                     BloomPage::PairDevice => self.render_pair_device_page(ui),
+                                    BloomPage::Downloads => self.render_downloads_page(ui),
                                 }
                             }
                             ui.add_space(28.0);
@@ -668,6 +766,19 @@ impl eframe::App for BloomApp {
                 if scaffold_resp.nav_clicked {
                     self.drawer_open = !self.drawer_open;
                 }
+                if toggle_dl_search {
+                    self.downloads_search_open = !self.downloads_search_open;
+                    if !self.downloads_search_open {
+                        self.downloads_search_query.clear();
+                    }
+                }
+                handle_borderless_titlebar_drag(
+                    ui,
+                    "bloom_main_drag",
+                    panel_rect,
+                    74.0,
+                    if is_downloads_page { 180.0 } else { 140.0 },
+                );
 
                 if is_decrypt_page {
                     let mut dec_action: Option<usize> = None;
@@ -821,6 +932,8 @@ impl eframe::App for BloomApp {
                 }
             }
         }
+
+        self.render_download_windows(ui.ctx());
 
         self.toast.ui(ui);
     }

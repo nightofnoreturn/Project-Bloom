@@ -6,15 +6,16 @@ use bloom_core::crypto::{decrypt_file_parallel, get_v2_key, key_from_string};
 use bloom_core::{
     adb_connect_wireless, adb_pair_and_connect_wireless, clear_render_index_cache,
     default_device_cache_path, default_render_cache_dir, delete_galaxy_cache,
-    fetch_and_cache_galaxy_devices, fetch_firmware_history, fetch_or_load_device_render_png,
-    has_newer_build_in_history, list_adb_mdns_services, render_cache_key,
-    resolve_binary_with_fallback, scan_connected_samsung_devices, BloomError, ChangelogLang,
-    ConnectedSamsungDevice, DeviceCatalog, ImeiDb,
+    derive_output_filenames, download_and_decrypt, fetch_and_cache_galaxy_devices,
+    fetch_firmware_history, fetch_or_load_device_render_png, has_newer_build_in_history,
+    list_adb_mdns_services, render_cache_key, resolve_binary_with_fallback,
+    scan_connected_samsung_devices, BloomError, ChangelogLang, ConnectedSamsungDevice,
+    DeviceCatalog, DownloadHandle, DownloadOptions, ImeiDb, JobStage,
 };
 
 use crate::state::{
-    derive_decrypted_output, DecryptForm, DeviceRenderState, FirmwareBinaryInfoState,
-    SharedUiState, SnackAction,
+    current_local_ymd, derive_decrypted_output, save_downloads_history, DecryptForm,
+    DeviceRenderState, DownloadJobRecord, FirmwareBinaryInfoState, SharedUiState, SnackAction,
 };
 
 pub fn spawn_manual_decrypt(
@@ -674,6 +675,203 @@ pub fn spawn_fetch_firmware_binary_info(
 
         if let Ok(mut guard) = shared.lock() {
             guard.firmware_binary_info.insert(cache_key, next_state);
+        }
+        ctx.request_repaint();
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_firmware_download(
+    rt: &tokio::runtime::Runtime,
+    shared: Arc<Mutex<SharedUiState>>,
+    imei_db: Arc<ImeiDb>,
+    ctx: egui::Context,
+    job_id: u64,
+    fw: String,
+    model: String,
+    region: String,
+    custom_imei: Option<String>,
+    allow_mismatch: bool,
+    options: DownloadOptions,
+    handle: DownloadHandle,
+) {
+    rt.spawn(async move {
+        let model_upper = model.trim().to_ascii_uppercase();
+        let region_upper = region.trim().to_ascii_uppercase();
+        let fw_upper = fw.trim().to_ascii_uppercase();
+        let imei_opt = custom_imei
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let resolved = resolve_binary_with_fallback(
+            &fw_upper,
+            &model_upper,
+            &region_upper,
+            imei_opt,
+            &imei_db,
+            allow_mismatch,
+        )
+        .await;
+
+        if handle.is_canceled() {
+            if let Ok(mut guard) = shared.lock() {
+                guard.active_downloads.retain(|j| j.id != job_id);
+            }
+            ctx.request_repaint();
+            return;
+        }
+        if handle.is_paused() {
+            if let Ok(mut guard) = shared.lock() {
+                if let Some(job) = guard.active_downloads.iter_mut().find(|j| j.id == job_id) {
+                    job.paused = true;
+                    job.bytes_per_sec = 0;
+                    job.active_connections = 0;
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
+
+        let (fus, info) = match resolved {
+            Ok(pair) => pair,
+            Err(err) => {
+                if let Ok(mut guard) = shared.lock() {
+                    if let Some(job) = guard.active_downloads.iter_mut().find(|j| j.id == job_id) {
+                        job.failed_error = Some(err.to_string());
+                        job.bytes_per_sec = 0;
+                        job.active_connections = 0;
+                    }
+                }
+                ctx.request_repaint();
+                return;
+            }
+        };
+
+        let (_, dec_name) = derive_output_filenames(&info.file_name, &fw_upper, &region_upper);
+        let clean_name = if options.extract_to_folder {
+            dec_name.strip_suffix(".zip").unwrap_or(&dec_name).to_owned()
+        } else {
+            dec_name
+        };
+        let package_total = info.size;
+
+        if let Ok(mut guard) = shared.lock() {
+            if let Some(job) = guard.active_downloads.iter_mut().find(|j| j.id == job_id) {
+                job.file_name = clean_name.clone();
+                job.package_size = package_total;
+                if job.total_bytes == 0 {
+                    job.total_bytes = package_total;
+                }
+                job.binary_info = Some(info.clone());
+            }
+        }
+        ctx.request_repaint();
+
+        let prog_shared = Arc::clone(&shared);
+        let prog_ctx = ctx.clone();
+        let result = download_and_decrypt(
+            fus,
+            info,
+            &model_upper,
+            &region_upper,
+            &fw_upper,
+            options,
+            handle,
+            move |snap| {
+                if let Ok(mut guard) = prog_shared.lock() {
+                    if let Some(job) = guard.active_downloads.iter_mut().find(|j| j.id == job_id) {
+                        job.stage = snap.stage;
+                        job.current_bytes = snap.current_bytes;
+                        job.total_bytes = snap.total_bytes;
+                        job.bytes_per_sec = snap.bytes_per_sec;
+                        job.active_connections = snap.active_connections;
+                        if !snap.segments.is_empty() {
+                            job.segments = snap.segments;
+                        } else if snap.stage != JobStage::Downloading {
+                            job.segments.clear();
+                        }
+                    }
+                }
+                prog_ctx.request_repaint();
+            },
+        )
+        .await;
+
+        match result {
+            Ok(outcome) => {
+                let out_path = outcome
+                    .extracted_dir
+                    .clone()
+                    .or(outcome.decrypted_path.clone())
+                    .unwrap_or(outcome.encrypted_path);
+                let completed_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let completed_ymd = current_local_ymd();
+                let final_size = outcome.total_bytes.max(package_total);
+
+                if let Ok(mut guard) = shared.lock() {
+                    let mut should_remove = false;
+                    if let Some(job) = guard.active_downloads.iter_mut().find(|j| j.id == job_id) {
+                        job.stage = JobStage::Completed;
+                        job.paused = false;
+                        job.failed_error = None;
+                        job.package_size = final_size;
+                        job.current_bytes = final_size;
+                        job.total_bytes = final_size;
+                        job.bytes_per_sec = 0;
+                        job.active_connections = 0;
+                        job.segments.clear();
+                        job.completed_output = Some(out_path.clone());
+                        should_remove = !job.window_open;
+                    }
+                    guard.completed_downloads.insert(
+                        0,
+                        DownloadJobRecord {
+                            id: job_id,
+                            file_name: clean_name,
+                            model: model_upper,
+                            region: region_upper,
+                            fw_string: fw_upper,
+                            total_bytes: final_size,
+                            output_path: out_path.clone(),
+                            completed_unix,
+                            completed_ymd,
+                        },
+                    );
+                    save_downloads_history(&guard.completed_downloads);
+                    guard.newly_completed_count = guard.newly_completed_count.saturating_add(1);
+                    guard.last_completed_output = Some(out_path);
+                    if should_remove {
+                        guard.active_downloads.retain(|j| j.id != job_id);
+                    }
+                }
+            }
+            Err(BloomError::Paused) => {
+                if let Ok(mut guard) = shared.lock() {
+                    if let Some(job) = guard.active_downloads.iter_mut().find(|j| j.id == job_id) {
+                        job.paused = true;
+                        job.bytes_per_sec = 0;
+                        job.active_connections = 0;
+                    }
+                }
+            }
+            Err(BloomError::Canceled) => {
+                if let Ok(mut guard) = shared.lock() {
+                    guard.active_downloads.retain(|j| j.id != job_id);
+                }
+            }
+            Err(err) => {
+                if let Ok(mut guard) = shared.lock() {
+                    if let Some(job) = guard.active_downloads.iter_mut().find(|j| j.id == job_id) {
+                        job.failed_error = Some(err.to_string());
+                        job.bytes_per_sec = 0;
+                        job.active_connections = 0;
+                    }
+                }
+            }
         }
         ctx.request_repaint();
     });

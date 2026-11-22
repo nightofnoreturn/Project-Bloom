@@ -1,6 +1,6 @@
 use egui::{
-    vec2, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Layout, Margin,
-    Response, RichText, Stroke, TextEdit, Ui,
+    pos2, vec2, Align, Align2, Area, Color32, CornerRadius, FontFamily, FontId, Frame, Layout,
+    Margin, Order, Rect, Response, RichText, Sense, Stroke, TextEdit, Ui, ViewportCommand,
 };
 use egui_twoui::prelude::*;
 use egui_twoui::tokens::dimens;
@@ -292,5 +292,105 @@ pub fn key_value_row(ui: &mut Ui, key: &str, value: &str, accent_value: bool) {
                     );
                 });
             });
+        });
+}
+
+/// Authentic One UI icon window controls (Minimize, Maximize/Restore, Close) for borderless windows.
+///
+/// Returns `true` when the Close button was clicked.
+pub fn render_oneui_window_controls(ui: &mut Ui) -> bool {
+    let theme = theme_from_ui(ui);
+    let p = &theme.palette;
+    let is_max = ui
+        .ctx()
+        .input(|i| i.viewport().maximized.unwrap_or(false));
+
+    if ui
+        .add(
+            TwoUiIconButton::new(TwoUiIcon::Minus)
+                .size(34.0)
+                .icon_size(14.0)
+                .tint(p.text_primary)
+                .tooltip("Minimize"),
+        )
+        .clicked()
+    {
+        ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
+    }
+
+    let (max_icon, max_tip) = if is_max {
+        (TwoUiIcon::Minimize, "Restore")
+    } else {
+        (TwoUiIcon::Expand, "Maximize")
+    };
+    if ui
+        .add(
+            TwoUiIconButton::new(max_icon)
+                .size(34.0)
+                .icon_size(14.0)
+                .tint(p.text_primary)
+                .tooltip(max_tip),
+        )
+        .clicked()
+    {
+        ui.ctx()
+            .send_viewport_cmd(ViewportCommand::Maximized(!is_max));
+    }
+
+    let close_clicked = ui
+        .add(
+            TwoUiIconButton::new(TwoUiIcon::Close)
+                .size(34.0)
+                .icon_size(14.0)
+                .tint(p.text_primary)
+                .tooltip("Close"),
+        )
+        .clicked();
+    if close_clicked {
+        ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+    }
+    close_clicked
+}
+
+/// Interactive drag & double-click maximize strip for borderless `TwoUiScaffold` windows.
+pub fn handle_borderless_titlebar_drag(
+    ui: &Ui,
+    id_salt: &str,
+    panel_rect: Rect,
+    left_reserve: f32,
+    right_reserve: f32,
+) {
+    let drag_left = panel_rect.left() + left_reserve;
+    let drag_right = panel_rect.right() - right_reserve;
+    if drag_right <= drag_left + 16.0 {
+        return;
+    }
+
+    let drag_rect = Rect::from_min_max(
+        pos2(drag_left, panel_rect.top() + 6.0),
+        pos2(drag_right, panel_rect.top() + 52.0),
+    );
+    let area_id = ui.make_persistent_id((id_salt, "oneui_drag_area"));
+    let drag_id = ui.make_persistent_id((id_salt, "oneui_drag_hit"));
+
+    Area::new(area_id)
+        .fixed_pos(drag_rect.min)
+        .movable(false)
+        .constrain(false)
+        .order(Order::Middle)
+        .show(ui.ctx(), |area_ui| {
+            area_ui.set_clip_rect(drag_rect);
+            area_ui.expand_to_include_rect(drag_rect);
+            let drag_resp = area_ui.interact(drag_rect, drag_id, Sense::click_and_drag());
+            if drag_resp.drag_started() {
+                ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+            }
+            if drag_resp.double_clicked() {
+                let is_max = ui
+                    .ctx()
+                    .input(|i| i.viewport().maximized.unwrap_or(false));
+                ui.ctx()
+                    .send_viewport_cmd(ViewportCommand::Maximized(!is_max));
+            }
         });
 }

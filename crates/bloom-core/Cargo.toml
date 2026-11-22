@@ -19,6 +19,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+zip.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 reqwest = { workspace = true, features = ["native-tls"] }

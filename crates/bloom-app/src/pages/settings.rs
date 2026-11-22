@@ -310,6 +310,14 @@ impl BloomApp {
                     .enabled(!is_busy)
                     .show(ui);
 
+                SwitchItem::new(
+                    &mut self.config.extract_to_folder,
+                    "Extract directly to folder",
+                )
+                .top_divider(true)
+                .enabled(!is_busy && self.config.decrypt_after_download)
+                .show(ui);
+
                 SwitchItem::new(&mut self.config.delete_encrypted, "Delete .enc4 / .enc2")
                     .top_divider(true)
                     .enabled(!is_busy && self.config.decrypt_after_download)

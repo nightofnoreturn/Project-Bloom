@@ -18,6 +18,7 @@ pub use adb::{
     scan_connected_samsung_devices, AdbDeviceListEntry, AdbMdnsService, AdbTransport,
     BatteryStatus, ConnectedSamsungDevice, DeviceConnectionMode,
 };
+pub use crypto::extract_encrypted_to_folder;
 pub use data::{
     country_name, BinaryFileInfo, CscDb, CscItem, ImeiDb, LatestVersionInfo, SmartBinaryInfo,
 };

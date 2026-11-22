@@ -340,6 +340,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 verify_checksums: !no_verify,
                 decrypt_after_download: !no_decrypt,
                 delete_encrypted_after_decrypt: delete_enc,
+                extract_to_folder: false,
             };
 
             let handle = DownloadHandle::new();
@@ -371,6 +372,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         JobStage::Downloading => "Download ",
                         JobStage::Verifying => "Verify   ",
                         JobStage::Decrypting => "Decrypt  ",
+                        JobStage::Extracting => "Extract  ",
                         JobStage::Completed => "Complete ",
                     };
                     print!(
