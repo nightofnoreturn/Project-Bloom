@@ -43,11 +43,12 @@ pub use history::{
     ChangelogLang, DecodedBuildCode, FirmwareUpdateType, HistoryItem, HistoryResult,
 };
 pub use odin::{
-    default_odin_backend, execute_safe_flash, extract_binary_from_build,
-    extract_model_and_binary_from_slots, probe_odin_device, reboot_connected_to_download_mode,
-    validate_odin_preflight, DownloadModeReboot, OdinCscMode, OdinDeviceSnapshot,
-    OdinFirmwareSlots, OdinFlashOptions, OdinFlashStage, OdinProgressEvent, OdinSafetyIssue,
-    OdinSlotKind,
+    default_flash_options_ini_path, default_odin_backend, delete_flash_options_ini,
+    execute_safe_flash, extract_binary_from_build, extract_model_and_binary_from_slots,
+    load_flash_options_ini, probe_odin_device, reboot_connected_to_download_mode,
+    save_flash_options_ini, validate_odin_preflight, verify_odin_package_md5, DownloadModeReboot,
+    OdinCscMode, OdinDeviceSnapshot, OdinFirmwareSlots, OdinFlashOptions, OdinFlashStage,
+    OdinProgressEvent, OdinSafetyIssue, OdinSlotKind,
 };
 pub use planner::{
     ClaimResult, SegmentAssignment, SegmentPlanner, SegmentProgress, SegmentState,

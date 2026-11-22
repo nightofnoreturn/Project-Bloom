@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once, OnceLock};
@@ -19,6 +20,7 @@ pub enum OdinSlotKind {
     Ap,
     Cp,
     Csc,
+    UserData,
 }
 
 impl OdinSlotKind {
@@ -28,6 +30,7 @@ impl OdinSlotKind {
             Self::Ap => "AP",
             Self::Cp => "CP",
             Self::Csc => "CSC",
+            Self::UserData => "USERDATA",
         }
     }
 }
@@ -46,14 +49,15 @@ pub struct OdinFirmwareSlots {
     pub ap: Option<PathBuf>,
     pub cp: Option<PathBuf>,
     pub csc: Option<PathBuf>,
+    pub userdata: Option<PathBuf>,
     pub home_csc_available: Option<PathBuf>,
     pub csc_wipe_available: Option<PathBuf>,
     pub csc_mode: OdinCscMode,
 }
 
 impl OdinFirmwareSlots {
-    /// Scan an extracted Samsung firmware folder and auto-populate `BL`, `AP`, `CP`, and `CSC`,
-    /// preferring `HOME_CSC` when available so user data stays intact by default.
+    /// Scan an extracted Samsung firmware folder and auto-populate `BL`, `AP`, `CP`, `CSC`, and
+    /// `USERDATA`, preferring `HOME_CSC` when available so user data stays intact by default.
     pub fn scan_firmware_folder(dir: &Path) -> std::io::Result<Self> {
         let mut slots = Self {
             folder: Some(dir.to_path_buf()),
@@ -84,6 +88,10 @@ impl OdinFirmwareSlots {
             {
                 if slots.ap.is_none() {
                     slots.ap = Some(path);
+                }
+            } else if upper.starts_with("USERDATA_") {
+                if slots.userdata.is_none() {
+                    slots.userdata = Some(path);
                 }
             } else if (upper.starts_with("CP_")
                 || upper.starts_with("MODEM_")
@@ -121,6 +129,7 @@ impl OdinFirmwareSlots {
                 }
                 self.csc = path;
             }
+            OdinSlotKind::UserData => self.userdata = path,
         }
     }
 
@@ -130,6 +139,7 @@ impl OdinFirmwareSlots {
             OdinSlotKind::Ap => self.ap.as_ref(),
             OdinSlotKind::Cp => self.cp.as_ref(),
             OdinSlotKind::Csc => self.csc.as_ref(),
+            OdinSlotKind::UserData => self.userdata.as_ref(),
         }
     }
 
@@ -154,12 +164,13 @@ impl OdinFirmwareSlots {
     }
 
     pub fn selected_packages(&self) -> Vec<(OdinSlotKind, PathBuf)> {
-        let mut out = Vec::with_capacity(4);
+        let mut out = Vec::with_capacity(5);
         for kind in [
             OdinSlotKind::Bl,
             OdinSlotKind::Ap,
             OdinSlotKind::Cp,
             OdinSlotKind::Csc,
+            OdinSlotKind::UserData,
         ] {
             if let Some(path) = self.slot(kind) {
                 out.push((kind, path.clone()));
@@ -169,12 +180,16 @@ impl OdinFirmwareSlots {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bl.is_none() && self.ap.is_none() && self.cp.is_none() && self.csc.is_none()
+        self.bl.is_none()
+            && self.ap.is_none()
+            && self.cp.is_none()
+            && self.csc.is_none()
+            && self.userdata.is_none()
     }
 
-    /// Returns `true` when the selected CSC package will wipe `USERDATA` (`CSC_*` instead of `HOME_CSC_*`).
+    /// Returns `true` when the selected CSC package or `USERDATA` slot will overwrite user data.
     pub fn will_wipe_data(&self) -> bool {
-        self.csc.as_ref().is_some_and(|p| !is_home_csc_path(p))
+        self.csc.as_ref().is_some_and(|p| !is_home_csc_path(p)) || self.userdata.is_some()
     }
 }
 
@@ -213,6 +228,12 @@ pub struct OdinDeviceSnapshot {
 pub struct OdinFlashOptions {
     pub auto_reboot: bool,
     pub verify_md5: bool,
+    pub nand_erase: bool,
+    pub re_partition: bool,
+    pub f_reset_time: bool,
+    pub device_info: bool,
+    pub flash_lock: bool,
+    pub decompress_data: bool,
 }
 
 impl Default for OdinFlashOptions {
@@ -220,8 +241,118 @@ impl Default for OdinFlashOptions {
         Self {
             auto_reboot: true,
             verify_md5: true,
+            nand_erase: false,
+            re_partition: false,
+            f_reset_time: true,
+            device_info: true,
+            flash_lock: false,
+            decompress_data: false,
         }
     }
+}
+
+/// App data `.ini` path used to persist unlocked advanced flash options.
+pub fn default_flash_options_ini_path() -> PathBuf {
+    crate::devices::default_device_cache_path().with_file_name("flash_options.ini")
+}
+
+fn parse_ini_bool(raw: &str) -> Option<bool> {
+    let clean = raw.trim();
+    if clean.eq_ignore_ascii_case("true") || clean == "1" {
+        Some(true)
+    } else if clean.eq_ignore_ascii_case("false") || clean == "0" {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Loads `flash_options.ini`. Returns `None` when absent (master switch off -> safe defaults).
+pub fn load_flash_options_ini(path: &Path) -> Option<OdinFlashOptions> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut opts = OdinFlashOptions::default();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('[')
+            || trimmed.starts_with('#')
+            || trimmed.starts_with(';')
+        {
+            continue;
+        }
+        let Some((key, val)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let Some(flag) = parse_ini_bool(val) else {
+            continue;
+        };
+        match key.trim() {
+            "AutoReboot" => opts.auto_reboot = flag,
+            "VerifyMd5" => opts.verify_md5 = flag,
+            "NandErase" => opts.nand_erase = flag,
+            "RePartition" => opts.re_partition = flag,
+            "FResetTime" => opts.f_reset_time = flag,
+            "DeviceInfo" => opts.device_info = flag,
+            "FlashLock" => opts.flash_lock = flag,
+            "DecompressData" => opts.decompress_data = flag,
+            _ => {}
+        }
+    }
+    Some(opts)
+}
+
+/// Persists advanced Odin flash options to `flash_options.ini`.
+pub fn save_flash_options_ini(path: &Path, opts: &OdinFlashOptions) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let body = format!(
+        "[OdinFlashOptions]\n\
+         AutoReboot={}\n\
+         VerifyMd5={}\n\
+         NandErase={}\n\
+         RePartition={}\n\
+         FResetTime={}\n\
+         DeviceInfo={}\n\
+         FlashLock={}\n\
+         DecompressData={}\n",
+        opts.auto_reboot,
+        opts.verify_md5,
+        opts.nand_erase,
+        opts.re_partition,
+        opts.f_reset_time,
+        opts.device_info,
+        opts.flash_lock,
+        opts.decompress_data,
+    );
+    std::fs::write(path, body)
+}
+
+/// Removes `flash_options.ini` when turning the master switch off to restore safe defaults.
+pub fn delete_flash_options_ini(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Verifies an Odin `.tar.md5` footer checksum cleanly (`Ok(())` for plain `.tar` files).
+pub async fn verify_odin_package_md5(path: &Path) -> Result<()> {
+    let fname = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("package")
+        .to_owned();
+    if !fname.to_ascii_lowercase().ends_with(".md5") {
+        return Ok(());
+    }
+    let file = File::open(path)?;
+    verify_md5_footer(AllowStdIo::new(file), &fname)
+        .await
+        .map_err(|e| BloomError::Odin(format!("MD5 check failed for {fname}: {e}")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +443,7 @@ pub fn extract_model_and_binary_from_slots(slots: &OdinFirmwareSlots) -> (Option
         OdinSlotKind::Bl,
         OdinSlotKind::Csc,
         OdinSlotKind::Cp,
+        OdinSlotKind::UserData,
     ] {
         let Some(path) = slots.slot(kind) else {
             continue;
@@ -676,6 +808,7 @@ fn emit_event(ev: OdinProgressEvent) {
 pub async fn execute_safe_flash<F>(
     slots: OdinFirmwareSlots,
     options: OdinFlashOptions,
+    already_verified_md5: HashSet<PathBuf>,
     on_event: F,
 ) -> Result<()>
 where
@@ -704,21 +837,47 @@ where
     }
     let _clear_guard = ClearReportGuard;
 
+    let mut adv_flags = Vec::new();
+    if options.nand_erase {
+        adv_flags.push("NAND Erase");
+    }
+    if options.re_partition {
+        adv_flags.push("Re-Partition");
+    }
+    if !options.f_reset_time {
+        adv_flags.push("No F. Reset Time");
+    }
+    if !options.device_info {
+        adv_flags.push("Skip DeviceInfo");
+    }
+    if options.flash_lock {
+        adv_flags.push("Flash Lock");
+    }
+    if options.decompress_data {
+        adv_flags.push("Decompress Data");
+    }
+    if !adv_flags.is_empty() {
+        emit_event(OdinProgressEvent::Log(format!(
+            "Advanced options: {}",
+            adv_flags.join(", ")
+        )));
+    }
+
     if options.verify_md5 {
-        emit_event(OdinProgressEvent::Stage(OdinFlashStage::VerifyingMd5));
-        for (_, path) in &packages {
-            let fname = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("package")
-                .to_owned();
-            if fname.to_ascii_lowercase().ends_with(".md5") {
-                let file = File::open(path)?;
-                verify_md5_footer(AllowStdIo::new(file), &fname)
-                    .await
-                    .map_err(|e| {
-                        BloomError::Odin(format!("MD5 check failed for {fname}: {e}"))
-                    })?;
+        let needs_md5: Vec<&PathBuf> = packages
+            .iter()
+            .map(|(_, p)| p)
+            .filter(|p| {
+                !already_verified_md5.contains(*p)
+                    && p.file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|n| n.to_ascii_lowercase().ends_with(".md5"))
+            })
+            .collect();
+        if !needs_md5.is_empty() {
+            emit_event(OdinProgressEvent::Stage(OdinFlashStage::VerifyingMd5));
+            for path in needs_md5 {
+                verify_odin_package_md5(path).await?;
             }
         }
     }
@@ -746,6 +905,7 @@ where
     let prepared = FlashRequest::new()
         .packages(opened)
         .reboot_mode(reboot_mode)
+        .erase(options.nand_erase)
         .prepare()
         .await
         .map_err(|e| BloomError::Odin(format!("Failed to prepare firmware: {e}")))?;
@@ -758,19 +918,25 @@ where
         .map_err(|e| BloomError::Odin(format!("Download Mode device not ready: {e}")))?;
 
     let mut connection = OdinConnection::open(transport);
-    if let Ok(dev_info) = connection.query_device_info().await {
-        let snap = snapshot_from_device_info(&dev_info);
-        emit_event(OdinProgressEvent::DeviceInfo(snap.clone()));
-        for issue in validate_odin_preflight(&slots, Some(&snap)) {
-            match issue {
-                OdinSafetyIssue::Warning(msg) => {
-                    emit_event(OdinProgressEvent::Log(format!("Warning: {msg}")));
-                }
-                OdinSafetyIssue::Blocked(msg) => {
-                    return Err(BloomError::Odin(msg));
+    if options.device_info {
+        if let Ok(dev_info) = connection.query_device_info().await {
+            let snap = snapshot_from_device_info(&dev_info);
+            emit_event(OdinProgressEvent::DeviceInfo(snap.clone()));
+            for issue in validate_odin_preflight(&slots, Some(&snap)) {
+                match issue {
+                    OdinSafetyIssue::Warning(msg) => {
+                        emit_event(OdinProgressEvent::Log(format!("Warning: {msg}")));
+                    }
+                    OdinSafetyIssue::Blocked(msg) => {
+                        return Err(BloomError::Odin(msg));
+                    }
                 }
             }
         }
+    } else {
+        emit_event(OdinProgressEvent::Log(
+            "DeviceInfo check skipped (advanced option)".into(),
+        ));
     }
 
     emit_event(OdinProgressEvent::Stage(OdinFlashStage::Handshake));
@@ -803,6 +969,7 @@ mod tests {
         let cp = dir.path().join("CP_S928BXXU4AYB7_CP123.tar.md5");
         let csc = dir.path().join("CSC_OXM_S928BOXM4AYB7_CL123.tar.md5");
         let home = dir.path().join("HOME_CSC_OXM_S928BOXM4AYB7_CL123.tar.md5");
+        let ud = dir.path().join("USERDATA_AIO_S928B_CL123.tar.md5");
         for f in [&bl, &ap, &cp, &csc, &home] {
             std::fs::write(f, b"dummy").unwrap();
         }
@@ -812,6 +979,7 @@ mod tests {
         assert_eq!(slots.ap.as_ref(), Some(&ap));
         assert_eq!(slots.cp.as_ref(), Some(&cp));
         assert_eq!(slots.csc.as_ref(), Some(&home));
+        assert_eq!(slots.userdata, None);
         assert_eq!(slots.csc_mode, OdinCscMode::KeepData);
         assert!(!slots.will_wipe_data());
         assert!(slots.can_toggle_csc_mode());
@@ -819,6 +987,35 @@ mod tests {
         slots.set_csc_mode(OdinCscMode::CleanInstall);
         assert_eq!(slots.csc.as_ref(), Some(&csc));
         assert!(slots.will_wipe_data());
+
+        std::fs::write(&ud, b"dummy").unwrap();
+        let with_ud = OdinFirmwareSlots::scan_firmware_folder(dir.path()).unwrap();
+        assert_eq!(with_ud.userdata.as_ref(), Some(&ud));
+        assert!(with_ud.will_wipe_data());
+    }
+
+    #[test]
+    fn roundtrips_and_deletes_flash_options_ini() {
+        let dir = tempdir().unwrap();
+        let ini = dir.path().join("nested").join("flash_options.ini");
+        assert_eq!(load_flash_options_ini(&ini), None);
+
+        let custom = OdinFlashOptions {
+            auto_reboot: false,
+            verify_md5: false,
+            nand_erase: true,
+            re_partition: true,
+            f_reset_time: false,
+            device_info: false,
+            flash_lock: true,
+            decompress_data: true,
+        };
+        save_flash_options_ini(&ini, &custom).unwrap();
+        assert_eq!(load_flash_options_ini(&ini), Some(custom));
+
+        delete_flash_options_ini(&ini).unwrap();
+        delete_flash_options_ini(&ini).unwrap();
+        assert_eq!(load_flash_options_ini(&ini), None);
     }
 
     #[test]

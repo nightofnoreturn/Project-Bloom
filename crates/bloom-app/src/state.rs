@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -107,6 +107,7 @@ pub struct AppConfig {
     pub history_lang_idx: usize,
     pub default_region_csc: Option<String>,
     pub dont_ask_default_region: bool,
+    pub dont_remind_flash_lockscreen: bool,
 }
 
 impl Default for AppConfig {
@@ -133,6 +134,7 @@ impl Default for AppConfig {
             history_lang_idx: 0,
             default_region_csc: None,
             dont_ask_default_region: false,
+            dont_remind_flash_lockscreen: false,
         }
     }
 }
@@ -292,12 +294,21 @@ impl ActiveDownloadJob {
     }
 }
 
+pub type PendingMd5Result = (
+    bloom_core::OdinSlotKind,
+    PathBuf,
+    std::result::Result<(), String>,
+);
+
 #[derive(Debug, Clone, Default)]
 pub struct FlashUiState {
     pub probing: bool,
     pub device_connected: bool,
     pub device_info: Option<bloom_core::OdinDeviceSnapshot>,
     pub rebooting_to_dl: bool,
+    pub verifying_md5: bool,
+    pub verified_md5_paths: HashSet<PathBuf>,
+    pub pending_md5_results: Vec<PendingMd5Result>,
     pub flashing: bool,
     pub stage: bloom_core::OdinFlashStage,
     pub current_partition: Option<String>,
@@ -341,7 +352,10 @@ pub struct SharedUiState {
 
 impl SharedUiState {
     pub fn is_busy(&self) -> bool {
-        self.decrypting || self.my_device_builds_loading || self.flash.flashing
+        self.decrypting
+            || self.my_device_builds_loading
+            || self.flash.flashing
+            || self.flash.verifying_md5
     }
 }
 

@@ -13,11 +13,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bloom_core::{
-    default_device_cache_path, generate_adb_qr_session, load_galaxy_cache, ConnectedSamsungDevice,
-    CscDb, CscItem, DeviceCatalog, DeviceConnectionMode, GalaxyDevice, HistoryItem, ImeiDb,
-    OdinFirmwareSlots, OdinFlashOptions,
+    default_device_cache_path, default_flash_options_ini_path, generate_adb_qr_session,
+    load_flash_options_ini, load_galaxy_cache, save_flash_options_ini, validate_odin_preflight,
+    ConnectedSamsungDevice, CscDb, CscItem, DeviceCatalog, DeviceConnectionMode, GalaxyDevice,
+    HistoryItem, ImeiDb, OdinDeviceSnapshot, OdinFirmwareSlots, OdinFlashOptions, OdinSafetyIssue,
 };
-use egui::{Frame, Id};
+use egui::{Align2, CornerRadius, Frame, Id, Order, Rect, Sense};
 use egui_twoui::prelude::*;
 
 use state::{
@@ -227,8 +228,18 @@ pub struct BloomApp {
 
     // Safe Odin flasher state
     pub flash_slots: OdinFirmwareSlots,
-    pub flash_auto_reboot: bool,
-    pub flash_verify_md5: bool,
+    pub flash_options: OdinFlashOptions,
+    pub flash_options_unlocked: bool,
+    pub flash_tab_idx: usize,
+    pub flash_options_tap_count: u8,
+    pub flash_entry_accepted: bool,
+    pub flash_entry_dialog_open: bool,
+    pub flash_entry_return_page: usize,
+    pub flash_lockscreen_dialog_open: bool,
+    pub flash_lockscreen_dont_remind_draft: bool,
+    pub flash_options_unlock_dialog_open: bool,
+    pub flash_md5_error_dialog_open: bool,
+    pub flash_md5_error_dialog_msg: String,
     pub flash_wipe_confirm_open: bool,
     pub flash_error_dialog_open: bool,
     pub flash_error_dialog_msg: String,
@@ -308,6 +319,9 @@ impl BloomApp {
         let initial_mdns_scan = Instant::now()
             .checked_sub(Duration::from_secs(2))
             .unwrap_or_else(Instant::now);
+        let loaded_flash_opts = load_flash_options_ini(&default_flash_options_ini_path());
+        let flash_options_unlocked = loaded_flash_opts.is_some();
+        let flash_options = loaded_flash_opts.unwrap_or_default();
 
         let app = Self {
             rt,
@@ -367,8 +381,18 @@ impl BloomApp {
             downloads_search_query: String::new(),
 
             flash_slots: OdinFirmwareSlots::default(),
-            flash_auto_reboot: true,
-            flash_verify_md5: true,
+            flash_options,
+            flash_options_unlocked,
+            flash_tab_idx: 0,
+            flash_options_tap_count: 0,
+            flash_entry_accepted: false,
+            flash_entry_dialog_open: false,
+            flash_entry_return_page: BloomPage::Browse.id(),
+            flash_lockscreen_dialog_open: false,
+            flash_lockscreen_dont_remind_draft: false,
+            flash_options_unlock_dialog_open: false,
+            flash_md5_error_dialog_open: false,
+            flash_md5_error_dialog_msg: String::new(),
             flash_wipe_confirm_open: false,
             flash_error_dialog_open: false,
             flash_error_dialog_msg: String::new(),
@@ -513,34 +537,31 @@ impl eframe::App for BloomApp {
         let theme = theme_from_ui(ui);
         apply_borderless_window_resize(ui.ctx(), &theme.palette);
 
-        let (
-            is_busy,
-            db_syncing,
-            update_checking,
-            pairing_busy,
-            connected_devices,
-            device_has_update,
-            active_download_count,
-            newly_completed,
-            flash_error_pending,
-        ): (
-            bool,
-            bool,
-            bool,
-            bool,
-            Vec<ConnectedSamsungDevice>,
-            Vec<bool>,
-            usize,
-            usize,
-            Option<String>,
-        ) = match self.shared.lock() {
-            Ok(mut g) => (
-                g.is_busy(),
-                g.device_db_syncing,
-                g.device_updates.values().any(|u| u.loading),
-                g.wireless_pair.pairing || g.wireless_pair.connecting,
-                g.connected_devices.clone(),
-                g.connected_devices
+        struct FrameSharedSnap {
+            is_busy: bool,
+            db_syncing: bool,
+            update_checking: bool,
+            pairing_busy: bool,
+            connected_devices: Vec<ConnectedSamsungDevice>,
+            device_has_update: Vec<bool>,
+            active_download_count: usize,
+            newly_completed: usize,
+            flash_error_pending: Option<String>,
+            flash_verifying_md5: bool,
+            flash_flashing: bool,
+            flash_device_info: Option<OdinDeviceSnapshot>,
+            pending_md5: Vec<state::PendingMd5Result>,
+        }
+
+        let snap = match self.shared.lock() {
+            Ok(mut g) => FrameSharedSnap {
+                is_busy: g.is_busy(),
+                db_syncing: g.device_db_syncing,
+                update_checking: g.device_updates.values().any(|u| u.loading),
+                pairing_busy: g.wireless_pair.pairing || g.wireless_pair.connecting,
+                connected_devices: g.connected_devices.clone(),
+                device_has_update: g
+                    .connected_devices
                     .iter()
                     .map(|d| {
                         g.device_updates
@@ -548,25 +569,60 @@ impl eframe::App for BloomApp {
                             .is_some_and(|u| u.checked && u.update_available)
                     })
                     .collect(),
-                g.active_downloads
+                active_download_count: g
+                    .active_downloads
                     .iter()
                     .filter(|j| !j.is_completed() && !j.canceled)
                     .count(),
-                std::mem::take(&mut g.newly_completed_count),
-                g.flash.pending_error_dialog.take(),
-            ),
-            Err(_) => (
-                false,
-                false,
-                false,
-                false,
-                Vec::new(),
-                Vec::new(),
-                0,
-                0,
-                None,
-            ),
+                newly_completed: std::mem::take(&mut g.newly_completed_count),
+                flash_error_pending: g.flash.pending_error_dialog.take(),
+                flash_verifying_md5: g.flash.verifying_md5,
+                flash_flashing: g.flash.flashing,
+                flash_device_info: g.flash.device_info.clone(),
+                pending_md5: std::mem::take(&mut g.flash.pending_md5_results),
+            },
+            Err(_) => FrameSharedSnap {
+                is_busy: false,
+                db_syncing: false,
+                update_checking: false,
+                pairing_busy: false,
+                connected_devices: Vec::new(),
+                device_has_update: Vec::new(),
+                active_download_count: 0,
+                newly_completed: 0,
+                flash_error_pending: None,
+                flash_verifying_md5: false,
+                flash_flashing: false,
+                flash_device_info: None,
+                pending_md5: Vec::new(),
+            },
         };
+
+        let is_busy = snap.is_busy;
+        let db_syncing = snap.db_syncing;
+        let update_checking = snap.update_checking;
+        let pairing_busy = snap.pairing_busy;
+        let connected_devices = snap.connected_devices;
+        let device_has_update = snap.device_has_update;
+        let active_download_count = snap.active_download_count;
+        let newly_completed = snap.newly_completed;
+        let flash_error_pending = snap.flash_error_pending;
+        let flash_verifying_md5 = snap.flash_verifying_md5;
+        let flash_flashing = snap.flash_flashing;
+        let flash_device_info = snap.flash_device_info;
+
+        for (slot, path, res) in snap.pending_md5 {
+            match res {
+                Ok(()) => {
+                    self.flash_slots.set_slot(slot, Some(path));
+                }
+                Err(err) => {
+                    self.flash_slots.set_slot(slot, None);
+                    self.flash_md5_error_dialog_msg = err;
+                    self.flash_md5_error_dialog_open = true;
+                }
+            }
+        }
 
         if is_busy || db_syncing || update_checking || pairing_busy || active_download_count > 0 {
             ui.ctx()
@@ -695,6 +751,20 @@ impl eframe::App for BloomApp {
             None,
         );
 
+        if self.page_id == BloomPage::Flash.id()
+            && prev_page_id != BloomPage::Flash.id()
+            && !self.flash_entry_accepted
+        {
+            self.flash_entry_return_page = prev_page_id;
+            self.page_id = prev_page_id;
+            self.flash_entry_dialog_open = true;
+        } else if self.page_id != BloomPage::Flash.id() && prev_page_id == BloomPage::Flash.id()
+        {
+            self.flash_entry_accepted = false;
+            self.flash_tab_idx = 0;
+            self.flash_options_tap_count = 0;
+        }
+
         if self.page_id >= CONNECTED_DEVICE_PAGE_BASE {
             if let Some(dev) = connected_devices.get(self.page_id - CONNECTED_DEVICE_PAGE_BASE) {
                 if !dev.can_open_device_page() {
@@ -739,7 +809,7 @@ impl eframe::App for BloomApp {
                 || self.selected_my_device.is_none()
                 || self.selected_my_region.is_none());
         self.snackbar.set_bottom_offset(
-            if is_decrypt_page || show_browse_bottom_search {
+            if is_decrypt_page || is_flash_page || show_browse_bottom_search {
                 88.0
             } else {
                 24.0
@@ -827,10 +897,182 @@ impl eframe::App for BloomApp {
                         }
                     }
                 }
+                if is_flash_page {
+                    let preflight_issues = if self.flash_options.device_info {
+                        validate_odin_preflight(&self.flash_slots, flash_device_info.as_ref())
+                    } else {
+                        validate_odin_preflight(&self.flash_slots, None)
+                    };
+                    let has_blocker = preflight_issues
+                        .iter()
+                        .any(|i| matches!(i, OdinSafetyIssue::Blocked(_)));
+                    let can_start = !flash_flashing
+                        && !flash_verifying_md5
+                        && !self.flash_slots.is_empty()
+                        && !has_blocker;
+
+                    let mut tab_draft = if self.flash_options_unlocked {
+                        self.flash_tab_idx
+                    } else {
+                        0
+                    };
+                    let mut start_flash_clicked = false;
+                    let mut options_tapped = false;
+
+                    show_bottom_floating_bar(
+                        ui,
+                        16.0,
+                        Id::unique("bloom_flash_bottom_bar"),
+                        |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.allocate_ui(egui::vec2(220.0, 64.0), |ui| {
+                                    let items = [
+                                        BottomNavItem::new("Flash")
+                                            .icon(TwoUiIcon::LightningOutline),
+                                        BottomNavItem::new("Options")
+                                            .icon(TwoUiIcon::SettingsOutline),
+                                    ];
+                                    MainTabBar::new("bloom_flash_main_tabs", &items, &mut tab_draft)
+                                        .show(ui);
+                                });
+                                if !self.flash_options_unlocked && tab_draft == 1 {
+                                    options_tapped = true;
+                                }
+
+                                let (play_rect, play_resp) = ui.allocate_exact_size(
+                                    egui::vec2(64.0, 64.0),
+                                    if can_start {
+                                        Sense::click()
+                                    } else {
+                                        Sense::hover()
+                                    },
+                                );
+                                if ui.is_rect_visible(play_rect) {
+                                    paint_floating_capsule(
+                                        ui,
+                                        play_rect,
+                                        CornerRadius::same(32),
+                                        theme.mode.is_dark(),
+                                        &theme.palette,
+                                    );
+                                    let inner = play_rect.shrink(6.0);
+                                    let pill_col = if flash_flashing {
+                                        theme.palette.primary.gamma_multiply(0.16)
+                                    } else if !can_start {
+                                        theme.palette.surface_container.gamma_multiply(0.6)
+                                    } else if play_resp.is_pointer_button_down_on() {
+                                        theme.palette.primary.gamma_multiply(0.85)
+                                    } else if play_resp.hovered() {
+                                        theme.palette.primary_high
+                                    } else {
+                                        theme.palette.primary
+                                    };
+                                    ui.painter().circle_filled(
+                                        inner.center(),
+                                        inner.width() * 0.5,
+                                        pill_col,
+                                    );
+
+                                    if flash_flashing {
+                                        let sp_rect = Rect::from_center_size(
+                                            inner.center(),
+                                            egui::vec2(24.0, 24.0),
+                                        );
+                                        ui.put(
+                                            sp_rect,
+                                            TwoUiSpinner::indeterminate(SpinnerSize::Small),
+                                        );
+                                    } else {
+                                        let ic_col = if can_start {
+                                            theme.palette.on_primary
+                                        } else {
+                                            theme.palette.text_disabled
+                                        };
+                                        TwoUiIcon::ControlPlay.paint(
+                                            ui,
+                                            Rect::from_center_size(
+                                                inner.center(),
+                                                egui::vec2(22.0, 22.0),
+                                            ),
+                                            ic_col,
+                                        );
+                                    }
+                                }
+                                if can_start && play_resp.on_hover_text("Start").clicked() {
+                                    start_flash_clicked = true;
+                                }
+                            });
+                        },
+                    );
+
+                    if !flash_flashing {
+                        if options_tapped {
+                            self.flash_tab_idx = 0;
+                            self.flash_options_tap_count =
+                                self.flash_options_tap_count.saturating_add(1);
+                            if self.flash_options_tap_count < 7 {
+                                let rem = 7 - self.flash_options_tap_count;
+                                let word = if rem == 1 { "time" } else { "times" };
+                                self.toast.show_message(
+                                    ui.ctx(),
+                                    format!(
+                                        "You are about to access advanced flash settings. Tap {rem} more {word} to continue."
+                                    ),
+                                    2.2,
+                                );
+                            } else {
+                                self.flash_options_tap_count = 0;
+                                self.flash_options_unlock_dialog_open = true;
+                            }
+                        } else if self.flash_options_unlocked {
+                            self.flash_tab_idx = tab_draft;
+                        }
+                    } else {
+                        self.flash_tab_idx = 0;
+                    }
+
+                    if start_flash_clicked {
+                        if self.flash_slots.will_wipe_data() || self.flash_options.nand_erase {
+                            self.flash_wipe_confirm_open = true;
+                        } else {
+                            spawn_odin_flash(
+                                &self.rt,
+                                Arc::clone(&self.shared),
+                                ui.ctx().clone(),
+                                self.flash_slots.clone(),
+                                self.flash_options,
+                            );
+                        }
+                    }
+                }
                 if show_browse_bottom_search {
                     self.render_browse_bottom_search_bar(ui);
                 }
             });
+
+        // Centered circular indeterminate spinner during immediate MD5 checks (no text, progress logged)
+        if flash_verifying_md5 {
+            egui::Area::new(Id::unique("bloom_flash_md5_spinner"))
+                .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .order(Order::Foreground)
+                .interactable(true)
+                .show(ui.ctx(), |ui| {
+                    let size = egui::vec2(88.0, 88.0);
+                    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        40.0,
+                        theme.palette.surface_container.gamma_multiply(0.92),
+                    );
+                    let spinner_rect =
+                        Rect::from_center_size(rect.center(), egui::vec2(48.0, 48.0));
+                    ui.put(
+                        spinner_rect,
+                        TwoUiSpinner::indeterminate(SpinnerSize::Large),
+                    );
+                });
+        }
 
         // Browse dialogs & custom FirmwareInfo modal
         self.render_firmware_info_modal(ui.ctx());
@@ -881,29 +1123,105 @@ impl eframe::App for BloomApp {
             }
         }
 
-        // Wipe confirmation dialog before flashing CSC (Clean install)
+        // 1. Entry suggestive dialog before accessing Flash page
+        if let Some(idx) = TwoUiSuggestiveDialog::new(
+            "bloom_flash_entry_dialog",
+            "Before you flash",
+            "Make sure you have downloaded the correct firmware binary for your device. Any risk from misusing this tool is your responsibility. Don't forget to back up your data.",
+        )
+        .icon(TwoUiIcon::Shield)
+        .width(400.0)
+        .action(DialogAction::cancel("Back"))
+        .action(DialogAction::primary("OK"))
+        .show(ui.ctx(), &mut self.flash_entry_dialog_open)
+        {
+            if idx == 1 {
+                self.flash_entry_accepted = true;
+                self.page_id = BloomPage::Flash.id();
+                if !self.config.dont_remind_flash_lockscreen {
+                    self.flash_lockscreen_dont_remind_draft = false;
+                    self.flash_lockscreen_dialog_open = true;
+                }
+            } else {
+                self.page_id = self.flash_entry_return_page;
+            }
+        }
+
+        // 2. Adaptive One UI security notice for entering Download mode
+        let lockscreen_dev_name = connected_devices
+            .first()
+            .map(|d| d.display_title())
+            .unwrap_or("your Samsung device");
+        let lockscreen_body = format!(
+            "Samsung may prevent {lockscreen_dev_name} from entering Download mode under newer One UI security policies.\n\nTurn off your screen lock or switch to Maintenance mode before entering Download mode."
+        );
+        if TwoUiDialog::new("bloom_flash_lockscreen_dialog", "Entering Download mode")
+            .body(&lockscreen_body)
+            .width(400.0)
+            .single_choice_option(&mut self.flash_lockscreen_dont_remind_draft, "Don't remind me again")
+            .action(DialogAction::primary("I understand"))
+            .show(ui.ctx(), &mut self.flash_lockscreen_dialog_open, |_| {})
+            .is_some()
+            && self.flash_lockscreen_dont_remind_draft
+        {
+            self.config.dont_remind_flash_lockscreen = true;
+        }
+
+        // 3. Suggestive dialog after 7 taps to unlock advanced Flash Options
+        if let Some(idx) = TwoUiSuggestiveDialog::new(
+            "bloom_flash_options_unlock_dialog",
+            "Advanced flash options",
+            "Make sure you understand what each setting does. We are not responsible for any risk caused by the options you change. When you are done, turn the master switch off to restore safe defaults.",
+        )
+        .icon(TwoUiIcon::ErrorFilled)
+        .width(400.0)
+        .action(DialogAction::cancel("Cancel"))
+        .action(DialogAction::primary("OK"))
+        .show(ui.ctx(), &mut self.flash_options_unlock_dialog_open)
+        {
+            if idx == 1 {
+                self.flash_options_unlocked = true;
+                let _ = save_flash_options_ini(
+                    &default_flash_options_ini_path(),
+                    &self.flash_options,
+                );
+                self.flash_tab_idx = 1;
+            }
+        }
+
+        // 4. Wipe / NAND Erase confirmation dialog before starting Flash
+        let wipe_body = if self.flash_options.nand_erase {
+            "NAND Erase is enabled and/or a clean wipe package is selected. All user data on this device will be permanently erased."
+        } else if self.flash_slots.userdata.is_some() {
+            "The selected USERDATA / CSC package will overwrite user data on this device."
+        } else {
+            "The selected CSC package will factory reset this device and erase all user data."
+        };
         if let Some(idx) = TwoUiDialog::new("bloom_flash_wipe_dialog", "Erase all data?")
-            .body("The selected CSC package will factory reset this device and erase all user data.")
+            .body(wipe_body)
             .action(DialogAction::cancel("Cancel"))
             .action(DialogAction::destructive("Erase & Flash"))
             .show(ui.ctx(), &mut self.flash_wipe_confirm_open, |_| {})
         {
             if idx == 1 {
-                let options = OdinFlashOptions {
-                    auto_reboot: self.flash_auto_reboot,
-                    verify_md5: self.flash_verify_md5,
-                };
                 spawn_odin_flash(
                     &self.rt,
                     Arc::clone(&self.shared),
                     ui.ctx().clone(),
                     self.flash_slots.clone(),
-                    options,
+                    self.flash_options,
                 );
             }
         }
 
-        // Crucial error dialog for Odin flash failures
+        // 5. Immediate MD5 checksum error dialog
+        let md5_err_body = self.flash_md5_error_dialog_msg.clone();
+        let _ = TwoUiDialog::new("bloom_flash_md5_error_dialog", "Invalid firmware file")
+            .body(&md5_err_body)
+            .action(DialogAction::primary("OK"))
+            .show(ui.ctx(), &mut self.flash_md5_error_dialog_open, |_| {});
+
+        // 6. Crucial error dialog for Odin flash failures
         let flash_err_body = self.flash_error_dialog_msg.clone();
         let _ = TwoUiDialog::new("bloom_flash_error_dialog", "Flash failed")
             .body(&flash_err_body)
