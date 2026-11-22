@@ -12,8 +12,8 @@ use egui::{
 use egui_twoui::prelude::*;
 
 use crate::state::{
-    format_bytes, format_duration_remaining, open_folder_in_os, ActiveDownloadJob,
-    DownloadJobRecord, FirmwareBinaryInfoState,
+    format_bytes, format_duration_remaining, open_folder_in_os, save_downloads_history,
+    ActiveDownloadJob, DownloadJobRecord, FirmwareBinaryInfoState,
 };
 use crate::tasks::spawn_firmware_download;
 use crate::widgets::key_value_row;
@@ -26,6 +26,18 @@ enum DlWinAction {
     Resume,
     Cancel,
     OpenFolder(PathBuf),
+    RemoveHistory,
+    DeleteFiles,
+}
+
+fn parse_kbps_to_bps(input: &str, fallback_mbps: f32) -> u64 {
+    let kbps = input
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 1.0)
+        .unwrap_or_else(|| (fallback_mbps * 1024.0).max(1.0));
+    (f64::from(kbps) * 1024.0).round() as u64
 }
 
 impl BloomApp {
@@ -87,12 +99,13 @@ impl BloomApp {
 
         let speed_limit_enabled = self.config.speed_limit_mbps > 0.0;
         let speed_limit_mbps = if speed_limit_enabled {
-            self.config.speed_limit_mbps.clamp(0.5, 200.0)
+            self.config.speed_limit_mbps.clamp(0.01, 1024.0)
         } else {
             10.0
         };
+        let speed_limit_input = format!("{:.0}", speed_limit_mbps * 1024.0);
         let speed_limit_bps = if speed_limit_enabled {
-            Some((f64::from(speed_limit_mbps) * 1_048_576.0) as u64)
+            Some(parse_kbps_to_bps(&speed_limit_input, speed_limit_mbps))
         } else {
             None
         };
@@ -150,9 +163,10 @@ impl BloomApp {
             drawer_open: false,
             selected_tab: 0,
             more_details_open: false,
+            delete_dialog_open: false,
             speed_limit_enabled,
             speed_limit_mbps,
-            speed_limit_input: format!("{speed_limit_mbps:.1}"),
+            speed_limit_input,
         };
 
         if let Ok(mut guard) = self.shared.lock() {
@@ -188,14 +202,10 @@ impl BloomApp {
         if let Ok(mut guard) = self.shared.lock() {
             if let Some(job) = guard.active_downloads.iter_mut().find(|j| j.id == job_id) {
                 let speed_bps = if job.speed_limit_enabled {
-                    let parsed = job
-                        .speed_limit_input
-                        .trim()
-                        .parse::<f32>()
-                        .ok()
-                        .filter(|v| *v > 0.0)
-                        .unwrap_or(job.speed_limit_mbps);
-                    Some((f64::from(parsed.max(0.05)) * 1_048_576.0) as u64)
+                    Some(parse_kbps_to_bps(
+                        &job.speed_limit_input,
+                        job.speed_limit_mbps,
+                    ))
                 } else {
                     None
                 };
@@ -274,10 +284,11 @@ impl BloomApp {
                 };
                 let speed_limit_enabled = self.config.speed_limit_mbps > 0.0;
                 let speed_limit_mbps = if speed_limit_enabled {
-                    self.config.speed_limit_mbps.clamp(0.5, 200.0)
+                    self.config.speed_limit_mbps.clamp(0.01, 1024.0)
                 } else {
                     10.0
                 };
+                let speed_limit_input = format!("{:.0}", speed_limit_mbps * 1024.0);
                 guard.active_downloads.push(ActiveDownloadJob {
                     id: job_id,
                     model: rec.model.clone(),
@@ -307,9 +318,10 @@ impl BloomApp {
                     drawer_open: false,
                     selected_tab: 0,
                     more_details_open: false,
+                    delete_dialog_open: false,
                     speed_limit_enabled,
                     speed_limit_mbps,
-                    speed_limit_input: format!("{speed_limit_mbps:.1}"),
+                    speed_limit_input,
                 });
                 focus_id = Some(job_id);
             }
@@ -353,6 +365,7 @@ impl BloomApp {
             } else {
                 job_snap.file_name.clone()
             };
+            let dialog_body = win_title.clone();
             let builder = ViewportBuilder::default()
                 .with_title(win_title)
                 .with_decorations(false)
@@ -457,6 +470,22 @@ impl BloomApp {
                                 job_snap.drawer_open = !job_snap.drawer_open;
                             }
                         });
+
+                    let delete_dialog_salt = format!("bloom_dl_del_dlg_{job_id}");
+                    if let Some(choice) = TwoUiDialog::new(&delete_dialog_salt, "Delete download?")
+                        .width(450.0)
+                        .body(&dialog_body)
+                        .action(DialogAction::cancel("Cancel"))
+                        .action(DialogAction::primary("Remove history"))
+                        .action(DialogAction::destructive("Delete file"))
+                        .show(ui.ctx(), &mut job_snap.delete_dialog_open, |_| {})
+                    {
+                        if choice == 1 {
+                            body_action = DlWinAction::RemoveHistory;
+                        } else if choice == 2 {
+                            body_action = DlWinAction::DeleteFiles;
+                        }
+                    }
                 },
             );
 
@@ -466,14 +495,10 @@ impl BloomApp {
 
             if speed_changed {
                 let next_bps = if job_snap.speed_limit_enabled {
-                    let eff = job_snap
-                        .speed_limit_input
-                        .trim()
-                        .parse::<f32>()
-                        .ok()
-                        .filter(|v| *v > 0.0)
-                        .unwrap_or(job_snap.speed_limit_mbps);
-                    Some((f64::from(eff.max(0.05)) * 1_048_576.0) as u64)
+                    Some(parse_kbps_to_bps(
+                        &job_snap.speed_limit_input,
+                        job_snap.speed_limit_mbps,
+                    ))
                 } else {
                     None
                 };
@@ -485,6 +510,7 @@ impl BloomApp {
                     job.drawer_open = job_snap.drawer_open;
                     job.selected_tab = job_snap.selected_tab;
                     job.more_details_open = job_snap.more_details_open;
+                    job.delete_dialog_open = job_snap.delete_dialog_open;
                     job.speed_limit_enabled = job_snap.speed_limit_enabled;
                     job.speed_limit_mbps = job_snap.speed_limit_mbps;
                     job.speed_limit_input = job_snap.speed_limit_input;
@@ -549,9 +575,50 @@ impl BloomApp {
                         self.toast.show_message(ctx, format!("{err}"), 2.4);
                     }
                 }
+                DlWinAction::RemoveHistory | DlWinAction::DeleteFiles => {
+                    let delete_files = matches!(action, DlWinAction::DeleteFiles);
+                    if let Ok(mut guard) = self.shared.lock() {
+                        if let Some(target) =
+                            guard.active_downloads.iter().find(|j| j.id == job_id).cloned()
+                        {
+                            if delete_files {
+                                if let Some(ref out_path) = target.completed_output {
+                                    if out_path.is_dir() {
+                                        let _ = std::fs::remove_dir_all(out_path);
+                                    } else if out_path.is_file() {
+                                        let _ = std::fs::remove_file(out_path);
+                                    }
+                                }
+                            }
+                            guard.completed_downloads.retain(|r| {
+                                !(r.model == target.model
+                                    && r.region == target.region
+                                    && r.fw_string == target.fw_string
+                                    && r.file_name == target.file_name)
+                            });
+                            save_downloads_history(&guard.completed_downloads);
+                        }
+                        guard.active_downloads.retain(|j| j.id != job_id);
+                    }
+                    ctx.send_viewport_cmd_to(
+                        ViewportId::from_hash_of(("bloom_dl_win", job_id)),
+                        ViewportCommand::Close,
+                    );
+                }
             }
         }
     }
+}
+
+fn info_row_divider(ui: &mut Ui, color: Color32) {
+    let rect = ui.available_rect_before_wrap();
+    ui.painter().line_segment(
+        [
+            pos2(rect.left() + 20.0, rect.top()),
+            pos2(rect.right() - 20.0, rect.top()),
+        ],
+        Stroke::new(1.0, color),
+    );
 }
 
 fn render_download_tab(
@@ -591,6 +658,7 @@ fn render_download_tab(
         0.0
     };
     let is_running = job.is_running();
+    let is_downloading_stage = job.stage == JobStage::Downloading && is_running;
 
     let downloaded_display = if job.is_completed() {
         format!("{} (100%)", format_bytes(job.package_size.max(job.total_bytes)))
@@ -625,13 +693,11 @@ fn render_download_tab(
         .inner_margin(Margin::symmetric(0, 6))
         .show(ui, |ui| {
             key_value_row(ui, "File size", &size_display, false);
+            info_row_divider(ui, p.divider);
             key_value_row(ui, "Downloaded", &downloaded_display, false);
-            key_value_row(
-                ui,
-                "Speed",
-                &speed_display,
-                is_running && job.bytes_per_sec > 0,
-            );
+            info_row_divider(ui, p.divider);
+            key_value_row(ui, "Speed", &speed_display, false);
+            info_row_divider(ui, p.divider);
             key_value_row(ui, "Time left", &time_left_display, false);
 
             if let Some(ref err) = job.failed_error {
@@ -660,23 +726,26 @@ fn render_download_tab(
     ui.add_space(16.0);
 
     let avail_w = ui.available_width();
-    if job.is_completed() {
-        let group_w = 40.0 + 18.0 + 128.0;
-        let pad = ((avail_w - group_w) * 0.5).max(0.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add_space(pad);
+    let group_w = 40.0 + 18.0 + 128.0 + 18.0 + 40.0;
+    let pad = ((avail_w - group_w) * 0.5).max(0.0);
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(pad);
+
+        if job.is_completed() {
             if ui
                 .add(
-                    TwoUiIconButton::new(TwoUiIcon::Close)
+                    TwoUiIconButton::new(TwoUiIcon::Delete)
                         .size(40.0)
                         .icon_size(17.0)
+                        .fill(p.surface_container)
                         .tint(p.text_primary)
-                        .tooltip("Close"),
+                        .tooltip("Delete"),
                 )
                 .clicked()
             {
-                *action = DlWinAction::Close;
+                job.delete_dialog_open = true;
             }
             ui.add_space(18.0);
             let open_target = job
@@ -684,36 +753,28 @@ fn render_download_tab(
                 .clone()
                 .unwrap_or_else(|| job.output_dir.clone());
             if ui
-                .add(
-                    TwoUiButton::contained_primary("Open folder")
-                        .min_size(vec2(128.0, 40.0)),
-                )
+                .add(TwoUiButton::contained_primary("Open folder").min_size(vec2(128.0, 40.0)))
                 .clicked()
             {
                 *action = DlWinAction::OpenFolder(open_target);
             }
-        });
-    } else {
-        let can_pause_or_resume =
-            job.stage == JobStage::Downloading || job.paused || job.failed_error.is_some();
-        let primary_label = if job.paused {
-            "Resume"
-        } else if job.failed_error.is_some() {
-            "Retry"
         } else {
-            "Pause"
-        };
-        let group_w = 40.0 + 18.0 + 128.0 + 18.0 + 40.0;
-        let pad = ((avail_w - group_w) * 0.5).max(0.0);
+            let can_pause_or_resume =
+                job.stage == JobStage::Downloading || job.paused || job.failed_error.is_some();
+            let primary_label = if job.paused {
+                "Resume"
+            } else if job.failed_error.is_some() {
+                "Retry"
+            } else {
+                "Pause"
+            };
 
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add_space(pad);
             if ui
                 .add(
                     TwoUiIconButton::new(TwoUiIcon::Close)
                         .size(40.0)
                         .icon_size(17.0)
+                        .fill(p.surface_container)
                         .tint(p.text_primary)
                         .tooltip("Cancel"),
                 )
@@ -736,28 +797,40 @@ fn render_download_tab(
                     DlWinAction::Pause
                 };
             }
-            ui.add_space(18.0);
-            let (more_icon, more_tip) = if job.more_details_open {
-                (TwoUiIcon::ChevronUp, "Hide details")
-            } else {
-                (TwoUiIcon::ChevronDown, "More details")
-            };
-            if ui
-                .add(
-                    TwoUiIconButton::new(more_icon)
-                        .size(40.0)
-                        .icon_size(18.0)
-                        .tint(p.text_primary)
-                        .tooltip(more_tip),
-                )
-                .clicked()
-            {
-                job.more_details_open = !job.more_details_open;
-            }
-        });
-    }
+        }
 
-    if job.more_details_open && !job.is_completed() {
+        ui.add_space(18.0);
+
+        let (more_icon, more_tip) = if job.more_details_open && is_downloading_stage {
+            (TwoUiIcon::ChevronUp, "Hide details")
+        } else {
+            (TwoUiIcon::ChevronDown, "More details")
+        };
+        if ui
+            .add_enabled(
+                is_downloading_stage,
+                TwoUiIconButton::new(more_icon)
+                    .size(40.0)
+                    .icon_size(18.0)
+                    .fill(if is_downloading_stage {
+                        p.surface_container
+                    } else {
+                        p.surface_container.gamma_multiply(0.45)
+                    })
+                    .tint(if is_downloading_stage {
+                        p.text_primary
+                    } else {
+                        p.text_disabled
+                    })
+                    .tooltip(more_tip),
+            )
+            .clicked()
+        {
+            job.more_details_open = !job.more_details_open;
+        }
+    });
+
+    if job.more_details_open && is_downloading_stage {
         ui.add_space(14.0);
 
         ui.horizontal(|ui| {
@@ -813,11 +886,6 @@ fn render_download_tab(
                 } else {
                     ui.spacing_mut().item_spacing.y = 8.0;
                     for worker in &rows {
-                        let status_color = match worker.status.as_str() {
-                            "Receiving data..." | "Connected" => p.primary_high,
-                            "Complete" => p.functional_green,
-                            _ => p.text_muted,
-                        };
                         ui.horizontal(|ui| {
                             ui.allocate_ui_with_layout(
                                 vec2(26.0, 20.0),
@@ -830,8 +898,9 @@ fn render_download_tab(
                                     );
                                 },
                             );
+                            ui.add_space(16.0);
                             ui.allocate_ui_with_layout(
-                                vec2(104.0, 20.0),
+                                vec2(108.0, 20.0),
                                 Layout::left_to_right(Align::Center),
                                 |ui| {
                                     ui.label(
@@ -846,7 +915,7 @@ fn render_download_tab(
                                     egui::Label::new(
                                         RichText::new(&worker.status)
                                             .font(font_id(ui, 13.0, TwoUiFontWeight::Regular))
-                                            .color(status_color),
+                                            .color(p.text_muted),
                                     )
                                     .wrap_mode(TextWrapMode::Truncate),
                                 );
@@ -1112,24 +1181,26 @@ fn render_limit_speed_tab(
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
-                            RichText::new("MiB/s")
+                            RichText::new("KB/s")
                                 .font(font_id(ui, 13.0, TwoUiFontWeight::Regular))
                                 .color(p.text_muted),
                         );
                         ui.add_space(6.0);
                         let edit_resp = Frame::NONE
                             .fill(p.surface_container)
-                            .corner_radius(CornerRadius::same(12))
+                            .corner_radius(CornerRadius::same(10))
                             .stroke(Stroke::new(1.0, p.divider))
-                            .inner_margin(Margin::symmetric(10, 5))
+                            .inner_margin(Margin::symmetric(8, 3))
                             .show(ui, |ui| {
+                                ui.spacing_mut().interact_size.y = 18.0;
+                                ui.set_width(58.0);
                                 ui.add_enabled(
                                     job.speed_limit_enabled,
                                     TextEdit::singleline(&mut job.speed_limit_input)
                                         .frame(Frame::NONE)
                                         .margin(Margin::ZERO)
-                                        .desired_width(56.0)
-                                        .font(font_id(ui, 14.0, TwoUiFontWeight::Medium))
+                                        .desired_width(58.0)
+                                        .font(font_id(ui, 13.5, TwoUiFontWeight::Medium))
                                         .text_color(if job.speed_limit_enabled {
                                             p.text_primary
                                         } else {
@@ -1140,8 +1211,8 @@ fn render_limit_speed_tab(
                             .inner;
                         if edit_resp.changed() {
                             if let Ok(val) = job.speed_limit_input.trim().parse::<f32>() {
-                                if val.is_finite() && val > 0.0 {
-                                    job.speed_limit_mbps = val.clamp(0.5, 200.0);
+                                if val.is_finite() && val >= 1.0 {
+                                    job.speed_limit_mbps = (val / 1024.0).clamp(0.01, 1024.0);
                                     changed = true;
                                 }
                             }

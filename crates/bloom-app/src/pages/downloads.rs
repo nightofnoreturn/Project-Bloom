@@ -175,7 +175,7 @@ impl BloomApp {
                                 let rect = ui.available_rect_before_wrap();
                                 let y = rect.top();
                                 ui.painter().line_segment(
-                                    [pos2(rect.left() + 70.0, y), pos2(rect.right() - 20.0, y)],
+                                    [pos2(rect.left() + 20.0, y), pos2(rect.right() - 20.0, y)],
                                     Stroke::new(1.0, p.divider),
                                 );
                             }
@@ -398,6 +398,14 @@ fn render_active_download_card(ui: &mut Ui, job: &ActiveDownloadJob) -> Option<D
                 action = Some(DownloadCardAction::CancelJob(job.id));
             }
 
+            ui.painter().line_segment(
+                [
+                    pos2(mid_x, bar_rect.top() + 12.0),
+                    pos2(mid_x, bar_rect.bottom() - 12.0),
+                ],
+                Stroke::new(1.0, p.divider),
+            );
+
             let right_sense = if can_pause_or_resume {
                 Sense::click()
             } else {
@@ -446,22 +454,12 @@ fn render_completed_download_row(ui: &mut Ui, rec: &DownloadJobRecord) -> bool {
     let p = theme.palette;
 
     let row_resp = Frame::NONE
-        .inner_margin(Margin::symmetric(18, 12))
+        .inner_margin(Margin::symmetric(20, 14))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (icon_rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
-                ui.painter().rect_filled(
-                    icon_rect,
-                    CornerRadius::same(12),
-                    p.surface_container,
-                );
-                TwoUiIcon::Download.paint(ui, icon_rect.shrink(10.0), p.primary_high);
-
-                ui.add_space(12.0);
-
-                let text_w = (ui.available_width() - 96.0).max(80.0);
+                let text_w = (ui.available_width() - 88.0).max(80.0);
                 ui.allocate_ui_with_layout(
-                    vec2(text_w, 40.0),
+                    vec2(text_w, 24.0),
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.add(

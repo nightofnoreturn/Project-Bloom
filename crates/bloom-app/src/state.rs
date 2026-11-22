@@ -266,6 +266,7 @@ pub struct ActiveDownloadJob {
     pub drawer_open: bool,
     pub selected_tab: usize,
     pub more_details_open: bool,
+    pub delete_dialog_open: bool,
     pub speed_limit_enabled: bool,
     pub speed_limit_mbps: f32,
     pub speed_limit_input: String,
