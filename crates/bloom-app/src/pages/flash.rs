@@ -604,21 +604,16 @@ impl BloomApp {
                     let input_w = text_right - text_left;
 
                     let path_font = font_id(&child_ui, 13.5, TwoUiFontWeight::Regular);
-                    let line_h = child_ui
-                        .painter()
-                        .layout_no_wrap("Ag".to_owned(), path_font.clone(), Color32::WHITE)
-                        .size()
-                        .y
-                        .max(18.0);
-                    let text_rect = Rect::from_min_size(
-                        pos2(text_left, path_rect.center().y - line_h * 0.5),
-                        vec2(input_w, line_h),
+                    let text_rect = Rect::from_min_max(
+                        pos2(text_left, path_rect.top()),
+                        pos2(text_right, path_rect.bottom()),
                     );
                     let mut edit_ui = child_ui.new_child(
                         UiBuilder::new()
                             .max_rect(text_rect)
                             .layout(Layout::left_to_right(Align::Center)),
                     );
+                    edit_ui.spacing_mut().interact_size.y = path_rect.height();
                     edit_ui.set_clip_rect(text_rect.intersect(child_ui.clip_rect()));
                     let mut view: &str = &path_str;
                     edit_ui.add(
