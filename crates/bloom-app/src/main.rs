@@ -836,6 +836,7 @@ impl eframe::App for BloomApp {
         );
 
         let mut toggle_dl_search = false;
+        let mut open_flash_help = false;
         let panel_frame = Frame::NONE.fill(theme.palette.round_and_bg);
         egui::CentralPanel::default()
             .frame(panel_frame)
@@ -871,7 +872,7 @@ impl eframe::App for BloomApp {
                                     )
                                     .clicked()
                             {
-                                self.flash_help_dialog_open = true;
+                                open_flash_help = true;
                             }
                         },
                         |ui| {
@@ -900,6 +901,9 @@ impl eframe::App for BloomApp {
                     if !self.downloads_search_open {
                         self.downloads_search_query.clear();
                     }
+                }
+                if open_flash_help {
+                    self.flash_help_dialog_open = true;
                 }
 
                 if is_decrypt_page {
