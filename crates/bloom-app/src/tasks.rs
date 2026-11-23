@@ -1129,6 +1129,7 @@ pub fn spawn_odin_flash(
         guard.flash.total_bytes = 0;
         guard.flash.logs.clear();
         guard.flash.pending_error_dialog = None;
+        guard.flash.pending_complete_dialog = None;
         guard.flash.verified_md5_paths.clone()
     } else {
         return;
@@ -1180,11 +1181,15 @@ pub fn spawn_odin_flash(
                 Ok(()) => {
                     guard.flash.stage = OdinFlashStage::Completed;
                     guard.flash.active_log_line = Some("Completed".to_owned());
-                    guard.pending_toast = Some(if options.device_info_only {
-                        "DeviceInfo check completed".to_owned()
+                    if options.device_info_only {
+                        guard.pending_toast = Some("DeviceInfo check completed".to_owned());
                     } else {
-                        "Flash completed".to_owned()
-                    });
+                        guard.flash.pending_complete_dialog = Some(if options.auto_reboot {
+                            "Flash completed. Your device will reboot automatically.".to_owned()
+                        } else {
+                            "Flash completed. You can reboot your device now.".to_owned()
+                        });
+                    }
                 }
                 Err(err) => {
                     let msg = err.to_string();

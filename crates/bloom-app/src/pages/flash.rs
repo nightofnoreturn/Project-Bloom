@@ -98,6 +98,7 @@ impl BloomApp {
         self.flash_options_unlock_dialog_open = false;
         self.flash_preflight_dialog_open = false;
         self.flash_help_dialog_open = false;
+        self.flash_complete_dialog_open = false;
 
         if let Ok(mut guard) = self.shared.lock() {
             guard.flash.session_gen = guard.flash.session_gen.wrapping_add(1);
@@ -110,6 +111,7 @@ impl BloomApp {
             guard.flash.current_bytes = 0;
             guard.flash.total_bytes = 0;
             guard.flash.pending_error_dialog = None;
+            guard.flash.pending_complete_dialog = None;
         }
     }
 

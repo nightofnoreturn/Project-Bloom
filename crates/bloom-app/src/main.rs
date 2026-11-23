@@ -250,6 +250,8 @@ pub struct BloomApp {
     pub flash_md5_error_dialog_msg: String,
     pub flash_error_dialog_open: bool,
     pub flash_error_dialog_msg: String,
+    pub flash_complete_dialog_open: bool,
+    pub flash_complete_dialog_msg: String,
     pub flash_pending_folder_slots: Option<OdinFirmwareSlots>,
     pub flash_csc_choice_dialog_open: bool,
     pub flash_reset_confirm_open: bool,
@@ -413,6 +415,8 @@ impl BloomApp {
             flash_md5_error_dialog_msg: String::new(),
             flash_error_dialog_open: false,
             flash_error_dialog_msg: String::new(),
+            flash_complete_dialog_open: false,
+            flash_complete_dialog_msg: String::new(),
             flash_pending_folder_slots: None,
             flash_csc_choice_dialog_open: false,
             flash_reset_confirm_open: false,
@@ -568,6 +572,7 @@ impl eframe::App for BloomApp {
             active_download_count: usize,
             newly_completed: usize,
             flash_error_pending: Option<String>,
+            flash_complete_pending: Option<String>,
             flash_verifying_md5: bool,
             flash_flashing: bool,
             flash_device_info: Option<OdinDeviceSnapshot>,
@@ -597,6 +602,7 @@ impl eframe::App for BloomApp {
                     .count(),
                 newly_completed: std::mem::take(&mut g.newly_completed_count),
                 flash_error_pending: g.flash.pending_error_dialog.take(),
+                flash_complete_pending: g.flash.pending_complete_dialog.take(),
                 flash_verifying_md5: g.flash.is_verifying_md5(),
                 flash_flashing: g.flash.flashing,
                 flash_device_info: g.flash.device_info.clone(),
@@ -612,6 +618,7 @@ impl eframe::App for BloomApp {
                 active_download_count: 0,
                 newly_completed: 0,
                 flash_error_pending: None,
+                flash_complete_pending: None,
                 flash_verifying_md5: false,
                 flash_flashing: false,
                 flash_device_info: None,
@@ -628,6 +635,7 @@ impl eframe::App for BloomApp {
         let active_download_count = snap.active_download_count;
         let newly_completed = snap.newly_completed;
         let flash_error_pending = snap.flash_error_pending;
+        let flash_complete_pending = snap.flash_complete_pending;
         let flash_verifying_md5 = snap.flash_verifying_md5;
         let flash_flashing = snap.flash_flashing;
         let flash_device_info = snap.flash_device_info;
@@ -662,6 +670,10 @@ impl eframe::App for BloomApp {
         if let Some(err_msg) = flash_error_pending {
             self.flash_error_dialog_msg = err_msg;
             self.flash_error_dialog_open = true;
+        }
+        if let Some(done_msg) = flash_complete_pending {
+            self.flash_complete_dialog_msg = done_msg;
+            self.flash_complete_dialog_open = true;
         }
 
         if self.last_usb_scan.elapsed() >= Duration::from_secs(3) {
@@ -1423,6 +1435,18 @@ impl eframe::App for BloomApp {
                 self.toast.show_message(ui.ctx(), "Flash reset", 2.0);
             }
         }
+
+        // 11. Post-flash completion suggestive dialog (OK only)
+        let complete_body = self.flash_complete_dialog_msg.clone();
+        let _ = TwoUiSuggestiveDialog::new(
+            "bloom_flash_complete_dialog",
+            "Flash completed",
+            &complete_body,
+        )
+        .icon(TwoUiIcon::CheckboxChecked)
+        .width(380.0)
+        .action(DialogAction::primary("OK"))
+        .show(ui.ctx(), &mut self.flash_complete_dialog_open);
 
         // USB debugging requirement modal dialog
         let non_adb_body = self

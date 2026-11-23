@@ -317,6 +317,7 @@ pub struct FlashUiState {
     pub total_bytes: u64,
     pub logs: Vec<String>,
     pub pending_error_dialog: Option<String>,
+    pub pending_complete_dialog: Option<String>,
 }
 
 impl FlashUiState {
