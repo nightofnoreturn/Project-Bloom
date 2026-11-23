@@ -60,28 +60,31 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run unit tests
-        shell: bash
-        run: |
-          cargo test --workspace
-          cargo test -p bloom-core --features mock-device
+        run: cargo test --workspace
+
+      - name: Run unit tests (mock-device)
+        run: cargo test -p bloom-core --features mock-device
 
       - name: Run Clippy
-        shell: bash
-        run: |
-          cargo clippy --workspace --all-targets
-          cargo clippy -p bloom-core --all-targets --features mock-device
-          cargo clippy -p bloom-app --all-targets --features mock-device
+        run: cargo clippy --workspace --all-targets
+
+      - name: Run Clippy (bloom-core mock-device)
+        run: cargo clippy -p bloom-core --all-targets --features mock-device
+
+      - name: Run Clippy (bloom-app mock-device)
+        run: cargo clippy -p bloom-app --all-targets --features mock-device
 
       - name: Build release binaries (GUI & CLI)
         if: "!startsWith(github.ref_name, 'test/')"
         run: cargo build --release --workspace
 
-      - name: Build release binaries with mock-device (GUI & CLI)
+      - name: Build release CLI (mock branch)
         if: startsWith(github.ref_name, 'test/')
-        shell: bash
-        run: |
-          cargo build --release -p bloom-cli
-          cargo build --release -p bloom-app --features mock-device
+        run: cargo build --release -p bloom-cli
+
+      - name: Build release GUI with mock-device
+        if: startsWith(github.ref_name, 'test/')
+        run: cargo build --release -p bloom-app --features mock-device
 
       - name: Stage release artifacts
         shell: bash

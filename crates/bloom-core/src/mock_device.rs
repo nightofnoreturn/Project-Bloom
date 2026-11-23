@@ -1560,6 +1560,16 @@ mod tests {
         ctrl.set_auto_reboot_transition(false);
     }
 
+    async fn run_mock_flash(slots: OdinFirmwareSlots) -> Result<()> {
+        Box::pin(execute_safe_flash(
+            slots,
+            OdinFlashOptions::default(),
+            HashSet::new(),
+            |_| {},
+        ))
+        .await
+    }
+
     #[test]
     fn pit_builder_roundtrips_with_samloader_pit() {
         let raw = build_mock_pit_bytes();
@@ -1578,105 +1588,52 @@ mod tests {
         // 1. Valid dummy full FW + HOME_CSC succeeds cleanly
         reset_controller_for_test(MockFaultPreset::None);
         let id = mock_device_controller().snapshot().identity;
-        let valid = generate_dummy_firmware(dir.path(), &id, MockDummyFirmwareKind::ValidFull).unwrap();
+        let valid =
+            generate_dummy_firmware(dir.path(), &id, MockDummyFirmwareKind::ValidFull).unwrap();
         let slots = OdinFirmwareSlots::scan_firmware_folder(&valid.folder).unwrap();
         assert!(!slots.will_wipe_data());
-        let res = execute_safe_flash(
-            slots.clone(),
-            OdinFlashOptions::default(),
-            HashSet::new(),
-            |_| {},
-        )
-        .await;
+        let res = run_mock_flash(slots.clone()).await;
         assert!(res.is_ok(), "expected mock flash success, got: {res:?}");
 
-        // 2. Super partition full -> SuperPartitionFull, data_written = false
-        reset_controller_for_test(MockFaultPreset::SuperPartitionFull);
-        let err = execute_safe_flash(
-            slots.clone(),
-            OdinFlashOptions::default(),
-            HashSet::new(),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        match err {
-            BloomError::OdinDetailed(rep) => {
-                assert_eq!(rep.category, OdinErrorCategory::SuperPartitionFull);
-                assert!(!rep.data_written);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        // 2..6. Fault injection matrix
+        let cases = [
+            (
+                MockFaultPreset::SuperPartitionFull,
+                OdinErrorCategory::SuperPartitionFull,
+                false,
+            ),
+            (
+                MockFaultPreset::AuthFailure,
+                OdinErrorCategory::AuthOrAntiRollback,
+                true,
+            ),
+            (
+                MockFaultPreset::TimeoutMidFlash,
+                OdinErrorCategory::UsbDisconnectedOrTimeout,
+                true,
+            ),
+            (
+                MockFaultPreset::UsbPortBusy,
+                OdinErrorCategory::UsbBusyOrDriver,
+                false,
+            ),
+            (
+                MockFaultPreset::HandshakeGarbage,
+                OdinErrorCategory::HandshakeOrProtocol,
+                false,
+            ),
+        ];
 
-        // 3. Auth failure mid-flash
-        reset_controller_for_test(MockFaultPreset::AuthFailure);
-        let err = execute_safe_flash(
-            slots.clone(),
-            OdinFlashOptions::default(),
-            HashSet::new(),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        match err {
-            BloomError::OdinDetailed(rep) => {
-                assert_eq!(rep.category, OdinErrorCategory::AuthOrAntiRollback);
+        for (fault, expected_category, expected_data_written) in cases {
+            reset_controller_for_test(fault);
+            let err = run_mock_flash(slots.clone()).await.unwrap_err();
+            match err {
+                BloomError::OdinDetailed(rep) => {
+                    assert_eq!(rep.category, expected_category, "fault={fault:?}");
+                    assert_eq!(rep.data_written, expected_data_written, "fault={fault:?}");
+                }
+                other => panic!("unexpected error for {fault:?}: {other:?}"),
             }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        // 4. Timeout mid-flash -> data_written = true
-        reset_controller_for_test(MockFaultPreset::TimeoutMidFlash);
-        let err = execute_safe_flash(
-            slots.clone(),
-            OdinFlashOptions::default(),
-            HashSet::new(),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        match err {
-            BloomError::OdinDetailed(rep) => {
-                assert_eq!(rep.category, OdinErrorCategory::UsbDisconnectedOrTimeout);
-                assert!(rep.data_written);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        // 5. USB port busy
-        reset_controller_for_test(MockFaultPreset::UsbPortBusy);
-        let err = execute_safe_flash(
-            slots.clone(),
-            OdinFlashOptions::default(),
-            HashSet::new(),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        match err {
-            BloomError::OdinDetailed(rep) => {
-                assert_eq!(rep.category, OdinErrorCategory::UsbBusyOrDriver);
-                assert!(!rep.data_written);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-
-        // 6. Handshake garbage
-        reset_controller_for_test(MockFaultPreset::HandshakeGarbage);
-        let err = execute_safe_flash(
-            slots,
-            OdinFlashOptions::default(),
-            HashSet::new(),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
-        match err {
-            BloomError::OdinDetailed(rep) => {
-                assert_eq!(rep.category, OdinErrorCategory::HandshakeOrProtocol);
-                assert!(!rep.data_written);
-            }
-            other => panic!("unexpected error: {other:?}"),
         }
 
         // 7. Corrupt MD5 rejected
@@ -1687,14 +1644,7 @@ mod tests {
             bl: corrupt.primary_file,
             ..Default::default()
         };
-        let err = execute_safe_flash(
-            corrupt_slots,
-            OdinFlashOptions::default(),
-            HashSet::new(),
-            |_| {},
-        )
-        .await
-        .unwrap_err();
+        let err = run_mock_flash(corrupt_slots).await.unwrap_err();
         match err {
             BloomError::OdinDetailed(rep) => {
                 assert_eq!(rep.category, OdinErrorCategory::Md5Mismatch);

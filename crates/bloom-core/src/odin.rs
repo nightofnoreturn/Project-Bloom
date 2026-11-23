@@ -311,7 +311,7 @@ pub async fn verify_odin_package_md5(path: &Path) -> Result<()> {
         return Ok(());
     }
     let file = File::open(path)?;
-    verify_md5_footer(AllowStdIo::new(file), &fname)
+    Box::pin(verify_md5_footer(AllowStdIo::new(file), &fname))
         .await
         .map_err(|e| {
             BloomError::OdinDetailed(Box::new(odin_md5_failure_report(&fname, &e.to_string())))
@@ -1181,7 +1181,7 @@ where
     let _clear_guard = ClearReportGuard;
 
     if options.device_info_only {
-        return execute_device_info_only().await;
+        return Box::pin(execute_device_info_only()).await;
     }
 
     let packages = slots.selected_packages();
@@ -1213,7 +1213,7 @@ where
         if !needs_md5.is_empty() {
             emit_event(OdinProgressEvent::Stage(OdinFlashStage::VerifyingMd5));
             for path in needs_md5 {
-                verify_odin_package_md5(path).await?;
+                Box::pin(verify_odin_package_md5(path)).await?;
             }
         }
     }
@@ -1247,12 +1247,14 @@ where
         RebootMode::None
     };
 
-    let prepared = FlashRequest::new()
-        .packages(opened)
-        .reboot_mode(reboot_mode)
-        .prepare()
-        .await
-        .map_err(|e| BloomError::OdinDetailed(Box::new(classify_flash_error(&e, false))))?;
+    let prepared = Box::pin(
+        FlashRequest::new()
+            .packages(opened)
+            .reboot_mode(reboot_mode)
+            .prepare(),
+    )
+    .await
+    .map_err(|e| BloomError::OdinDetailed(Box::new(classify_flash_error(&e, false))))?;
 
     emit_event(OdinProgressEvent::Stage(OdinFlashStage::Connecting));
     emit_event(OdinProgressEvent::Log("Connecting to Download Mode device...".into()));
@@ -1280,18 +1282,19 @@ where
     }
 
     emit_event(OdinProgressEvent::Stage(OdinFlashStage::Handshake));
-    let mut session = connection
-        .begin_session()
+    let mut session = Box::pin(connection.begin_session())
         .await
         .map_err(|e| BloomError::OdinDetailed(Box::new(classify_odin_error(&e, false))))?;
 
     emit_event(OdinProgressEvent::Stage(OdinFlashStage::Flashing));
-    prepared.execute(&mut session).await.map_err(|e| {
-        BloomError::OdinDetailed(Box::new(classify_flash_error(
-            &e,
-            flash_has_started_writing(),
-        )))
-    })?;
+    Box::pin(prepared.execute(&mut session))
+        .await
+        .map_err(|e| {
+            BloomError::OdinDetailed(Box::new(classify_flash_error(
+                &e,
+                flash_has_started_writing(),
+            )))
+        })?;
 
     emit_event(OdinProgressEvent::Stage(OdinFlashStage::Completed));
     emit_event(OdinProgressEvent::Log("All threads completed".into()));
@@ -1318,8 +1321,7 @@ async fn execute_device_info_only() -> Result<()> {
     }
 
     emit_event(OdinProgressEvent::Stage(OdinFlashStage::Handshake));
-    let mut session = connection
-        .begin_session()
+    let mut session = Box::pin(connection.begin_session())
         .await
         .map_err(|e| BloomError::OdinDetailed(Box::new(classify_odin_error(&e, false))))?;
 
