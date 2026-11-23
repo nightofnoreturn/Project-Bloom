@@ -42,6 +42,15 @@ fn format_slot_added_log(slot: OdinSlotKind, path: &Path) -> String {
     format!("Added {}: {fname}", slot.label())
 }
 
+fn format_non_download_mode_status(dev: &bloom_core::ConnectedSamsungDevice) -> String {
+    let label = dev.connection_label();
+    if label.to_ascii_lowercase().ends_with("mode") {
+        format!("Device is still in {label}")
+    } else {
+        format!("Device is still in {label} mode")
+    }
+}
+
 impl BloomApp {
     pub(crate) fn apply_scanned_flash_slots(
         &mut self,
@@ -318,23 +327,35 @@ impl BloomApp {
         );
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let status_label = flash_snap
-                .active_log_line
-                .as_deref()
-                .unwrap_or_else(|| flash_snap.stage.label());
+            let status_label = if is_flashing || flash_snap.stage != OdinFlashStage::Idle {
+                flash_snap
+                    .active_log_line
+                    .as_deref()
+                    .unwrap_or_else(|| flash_snap.stage.label())
+            } else {
+                ""
+            };
             ui.label(
                 RichText::new(status_label)
                     .font(font_id(ui, 13.0, TwoUiFontWeight::Medium))
                     .color(p.text_primary),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let pct_label = if flash_snap.stage == OdinFlashStage::Completed {
+                let right_label = if flash_snap.stage == OdinFlashStage::Completed {
                     "100%".to_owned()
-                } else {
+                } else if is_flashing || flash_snap.stage == OdinFlashStage::Failed {
                     format!("{:.0}%", frac * 100.0)
+                } else if flash_snap.device_connected {
+                    "Ready".to_owned()
+                } else if let Some(dev) = connected_devices.iter().find(|d| !d.is_download_mode()) {
+                    format_non_download_mode_status(dev)
+                } else if !connected_devices.is_empty() {
+                    "Ready".to_owned()
+                } else {
+                    "No device".to_owned()
                 };
                 ui.label(
-                    RichText::new(pct_label)
+                    RichText::new(right_label)
                         .font(font_id(ui, 13.0, TwoUiFontWeight::Medium))
                         .color(p.text_muted),
                 );
