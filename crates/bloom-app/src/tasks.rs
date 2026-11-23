@@ -1044,13 +1044,14 @@ pub fn spawn_verify_odin_slot_md5(
     slot: OdinSlotKind,
     path: PathBuf,
 ) {
-    if let Ok(mut guard) = shared.lock() {
+    let session_gen = if let Ok(mut guard) = shared.lock() {
         if guard.flash.flashing || !guard.flash.verifying_md5_slots.insert(slot) {
             return;
         }
+        guard.flash.session_gen
     } else {
         return;
-    }
+    };
 
     let fname = path
         .file_name()
@@ -1076,6 +1077,9 @@ pub fn spawn_verify_odin_slot_md5(
         };
 
         if let Ok(mut guard) = shared.lock() {
+            if guard.flash.session_gen != session_gen {
+                return;
+            }
             guard.flash.verifying_md5_slots.remove(&slot);
             match res {
                 Ok(()) => {

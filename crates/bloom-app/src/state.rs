@@ -302,6 +302,7 @@ pub type PendingMd5Result = (
 
 #[derive(Debug, Clone, Default)]
 pub struct FlashUiState {
+    pub session_gen: u64,
     pub probing: bool,
     pub device_connected: bool,
     pub device_info: Option<bloom_core::OdinDeviceSnapshot>,

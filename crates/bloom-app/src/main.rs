@@ -16,7 +16,8 @@ use bloom_core::{
     default_device_cache_path, default_flash_options_ini_path, generate_adb_qr_session,
     load_flash_options_ini, load_galaxy_cache, save_flash_options_ini, validate_odin_preflight,
     ConnectedSamsungDevice, CscDb, CscItem, DeviceCatalog, DeviceConnectionMode, GalaxyDevice,
-    HistoryItem, ImeiDb, OdinDeviceSnapshot, OdinFirmwareSlots, OdinFlashOptions, OdinSafetyIssue,
+    HistoryItem, ImeiDb, OdinCscMode, OdinDeviceSnapshot, OdinFirmwareSlots, OdinFlashOptions,
+    OdinSafetyIssue,
 };
 use egui::{CornerRadius, Frame, Id, Rect, Sense};
 use egui_twoui::prelude::*;
@@ -249,10 +250,14 @@ pub struct BloomApp {
     pub flash_md5_error_dialog_msg: String,
     pub flash_error_dialog_open: bool,
     pub flash_error_dialog_msg: String,
+    pub flash_pending_folder_slots: Option<OdinFirmwareSlots>,
+    pub flash_csc_choice_dialog_open: bool,
+    pub flash_reset_confirm_open: bool,
     pub last_flash_probe: Instant,
 
     // Navigation & global overlays
     pub page_id: usize,
+    pub last_rendered_page_id: usize,
     pub drawer_open: bool,
     pub color_dialog_open: bool,
     pub color_dialog_draft: egui::Color32,
@@ -408,9 +413,13 @@ impl BloomApp {
             flash_md5_error_dialog_msg: String::new(),
             flash_error_dialog_open: false,
             flash_error_dialog_msg: String::new(),
+            flash_pending_folder_slots: None,
+            flash_csc_choice_dialog_open: false,
+            flash_reset_confirm_open: false,
             last_flash_probe: initial_mdns_scan,
 
             page_id: BloomPage::Browse.id(),
+            last_rendered_page_id: BloomPage::Browse.id(),
             drawer_open: true,
             color_dialog_open: false,
             color_dialog_draft: color_draft,
@@ -773,8 +782,12 @@ impl eframe::App for BloomApp {
         } else if self.page_id != BloomPage::Flash.id() && prev_page_id == BloomPage::Flash.id()
         {
             self.flash_entry_accepted = false;
-            self.flash_tab_idx = 0;
-            self.flash_options_tap_count = 0;
+            if !flash_flashing {
+                self.reset_flash_session();
+            } else {
+                self.flash_tab_idx = 0;
+                self.flash_options_tap_count = 0;
+            }
         }
 
         if self.page_id >= CONNECTED_DEVICE_PAGE_BASE {
@@ -1295,7 +1308,7 @@ impl eframe::App for BloomApp {
         // 6. Help guide modal (? toolbar button)
         if self.flash_help_dialog_open {
             let p_help = &theme.palette;
-            let _ = TwoUiDialog::new("bloom_flash_help_dialog", "How to use Flash")
+            let _ = TwoUiDialog::new("bloom_flash_help_dialog", "Help")
                 .width(460.0)
                 .action(DialogAction::primary("OK"))
                 .show(ui.ctx(), &mut self.flash_help_dialog_open, |ui| {
@@ -1366,6 +1379,50 @@ impl eframe::App for BloomApp {
             .body(&flash_err_body)
             .action(DialogAction::primary("OK"))
             .show(ui.ctx(), &mut self.flash_error_dialog_open, |_| {});
+
+        // 9. CSC choice suggestive dialog when folder has both HOME_CSC and CSC
+        if let Some(idx) = TwoUiSuggestiveDialog::new(
+            "bloom_flash_csc_choice_dialog",
+            "Choose CSC package",
+            "Both HOME_CSC and CSC were found in this folder.\n\nKeep data uses HOME_CSC and keeps your data intact. Clean install uses CSC and will erase all data on your device.",
+        )
+        .icon(TwoUiIcon::FolderOutline)
+        .width(420.0)
+        .action(DialogAction::primary("Keep data"))
+        .action(DialogAction::destructive("Clean install"))
+        .show(ui.ctx(), &mut self.flash_csc_choice_dialog_open)
+        {
+            if let Some(mut scanned) = self.flash_pending_folder_slots.take() {
+                let mode = if idx == 0 {
+                    OdinCscMode::KeepData
+                } else {
+                    OdinCscMode::CleanInstall
+                };
+                scanned.set_csc_mode(mode);
+                self.apply_scanned_flash_slots(ui.ctx(), scanned);
+            }
+        }
+        if !self.flash_csc_choice_dialog_open {
+            self.flash_pending_folder_slots = None;
+        }
+
+        // 10. Reset Flash session suggestive dialog
+        if let Some(idx) = TwoUiSuggestiveDialog::new(
+            "bloom_flash_reset_dialog",
+            "Reset Flash?",
+            "This will clear all loaded binaries, logs, and current flashing configuration, returning the Flash page to an empty default state.",
+        )
+        .icon(TwoUiIcon::Refresh)
+        .width(400.0)
+        .action(DialogAction::cancel("Cancel"))
+        .action(DialogAction::destructive("Reset"))
+        .show(ui.ctx(), &mut self.flash_reset_confirm_open)
+        {
+            if idx == 1 {
+                self.reset_flash_session();
+                self.toast.show_message(ui.ctx(), "Flash reset", 2.0);
+            }
+        }
 
         // USB debugging requirement modal dialog
         let non_adb_body = self
@@ -1440,6 +1497,19 @@ impl eframe::App for BloomApp {
         }
 
         self.render_download_windows(ui.ctx());
+
+        if self.last_rendered_page_id == BloomPage::Flash.id()
+            && self.page_id != BloomPage::Flash.id()
+        {
+            self.flash_entry_accepted = false;
+            if !flash_flashing {
+                self.reset_flash_session();
+            } else {
+                self.flash_tab_idx = 0;
+                self.flash_options_tap_count = 0;
+            }
+        }
+        self.last_rendered_page_id = self.page_id;
 
         self.toast.ui(ui);
     }
