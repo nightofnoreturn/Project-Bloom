@@ -1286,6 +1286,11 @@ fn query_adb_shell(serial: &str, shell_cmd: &str) -> Option<String> {
 
 /// Reboots an ADB-connected Samsung device directly into Odin Download Mode (`reboot:download`).
 pub fn adb_reboot_download(serial: Option<&str>) -> std::result::Result<(), String> {
+    #[cfg(feature = "mock-device")]
+    if crate::mock_device::mock_device_controller().is_enabled() {
+        let _ = serial;
+        return crate::mock_device::mock_device_controller().adb_reboot_to_download_mode();
+    }
     let mut stream = ensure_adb_stream(ADB_IO_TIMEOUT)
         .ok_or_else(|| "ADB server is not running".to_owned())?;
     let transport_cmd = match serial.map(str::trim).filter(|s| !s.is_empty()) {
@@ -1601,6 +1606,10 @@ pub fn merge_and_deduplicate_devices(
 /// Scans connected Samsung devices across ADB (USB + Wi-Fi) and Windows WPD standard USB,
 /// returning a deduplicated unified list with connection readiness metadata.
 pub fn scan_connected_samsung_devices() -> Vec<ConnectedSamsungDevice> {
+    #[cfg(feature = "mock-device")]
+    if crate::mock_device::mock_device_controller().is_enabled() {
+        return crate::mock_device::mock_device_controller().connected_non_download_devices();
+    }
     let entries = query_adb_devices_entries();
     let mut adb_ready = Vec::new();
     let mut adb_unauth = Vec::new();

@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "Native Windows & Linux GUI for Project Bloom."
 
+[features]
+default = []
+mock-device = ["bloom-core/mock-device"]
+
 [[bin]]
 name = "bloom-app"
 path = "src/main.rs"

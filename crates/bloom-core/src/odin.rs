@@ -8,7 +8,8 @@ use samloader_odin::futures::io::AllowStdIo;
 use samloader_odin::samloader_pit::PitData;
 use samloader_odin::{
     create_backend, detect_device, reboot_download, set_progress, verify_md5_footer, DeviceInfo,
-    FlashEvent, FlashProgress, FlashRequest, OdinConnection, RebootMode, UsbBackendOption,
+    FlashError, FlashEvent, FlashProgress, FlashRequest, LokeError, OdinConnection, OdinError,
+    RebootMode, TransportError, UsbBackendOption, UsbTransfer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -312,13 +313,367 @@ pub async fn verify_odin_package_md5(path: &Path) -> Result<()> {
     let file = File::open(path)?;
     verify_md5_footer(AllowStdIo::new(file), &fname)
         .await
-        .map_err(|e| BloomError::Odin(format!("MD5 check failed for {fname}: {e}")))
+        .map_err(|e| {
+            BloomError::OdinDetailed(Box::new(odin_md5_failure_report(&fname, &e.to_string())))
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OdinSafetyIssue {
     Warning(String),
     Blocked(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OdinErrorCategory {
+    DeviceNotFound,
+    UsbBusyOrDriver,
+    UsbDisconnectedOrTimeout,
+    PreflightBlocked,
+    FirmwareCorrupted,
+    Md5Mismatch,
+    AuthOrAntiRollback,
+    SuperPartitionFull,
+    StorageWriteFailure,
+    PartitionTableMismatch,
+    HandshakeOrProtocol,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OdinFailureReport {
+    pub category: OdinErrorCategory,
+    pub title: String,
+    pub summary: String,
+    pub recovery: String,
+    pub technical_detail: String,
+    pub data_written: bool,
+}
+
+impl OdinFailureReport {
+    pub fn new(
+        category: OdinErrorCategory,
+        title: impl Into<String>,
+        summary: impl Into<String>,
+        recovery: impl Into<String>,
+        technical_detail: impl Into<String>,
+        data_written: bool,
+    ) -> Self {
+        Self {
+            category,
+            title: title.into(),
+            summary: summary.into(),
+            recovery: recovery.into(),
+            technical_detail: technical_detail.into(),
+            data_written,
+        }
+    }
+
+    pub fn dialog_body(&self) -> String {
+        let mut out = format!("{}\n\nWhat to do next:\n{}", self.summary, self.recovery);
+        if !self.technical_detail.is_empty() {
+            out.push_str(&format!("\n\nDetails: {}", self.technical_detail));
+        }
+        out
+    }
+}
+
+impl std::fmt::Display for OdinFailureReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.title, self.summary)
+    }
+}
+
+pub fn odin_preflight_failure_report(msg: String) -> OdinFailureReport {
+    OdinFailureReport::new(
+        OdinErrorCategory::PreflightBlocked,
+        "Flash blocked for safety",
+        msg.clone(),
+        "Verify the selected firmware files match your connected phone's model and bootloader binary level before flashing.",
+        msg,
+        false,
+    )
+}
+
+pub fn odin_md5_failure_report(fname: &str, detail: &str) -> OdinFailureReport {
+    OdinFailureReport::new(
+        OdinErrorCategory::Md5Mismatch,
+        "Invalid firmware checksum",
+        format!("{fname} failed MD5 integrity verification and may be corrupted or incomplete."),
+        "Re-download or re-extract the firmware archive instead of disabling MD5 verification.",
+        detail.to_owned(),
+        false,
+    )
+}
+
+pub fn classify_transport_error(err: &TransportError, data_written: bool) -> OdinFailureReport {
+    let detail = err.to_string();
+    match err {
+        TransportError::DeviceNotFound => OdinFailureReport::new(
+            OdinErrorCategory::DeviceNotFound,
+            "Download Mode device not found",
+            "No Samsung device was detected in Download Mode.",
+            "Boot your phone into Download Mode (or click Reboot to Download mode while connected via ADB), ensure Samsung USB drivers are installed, and try again.",
+            detail,
+            false,
+        ),
+        TransportError::NormalModeDeviceNotFound => OdinFailureReport::new(
+            OdinErrorCategory::DeviceNotFound,
+            "Device not connected",
+            "No Samsung device was detected over USB.",
+            "Connect your phone with a reliable USB data cable, unlock the screen, and retry.",
+            detail,
+            false,
+        ),
+        TransportError::InterfaceClaimFailed
+        | TransportError::InterfaceSetupFailed
+        | TransportError::DeviceAccess(_)
+        | TransportError::ConfigDescriptorRetrieval
+        | TransportError::InterfaceConfigurationNotFound => OdinFailureReport::new(
+            OdinErrorCategory::UsbBusyOrDriver,
+            "USB port busy or blocked",
+            "Bloom could not claim the Samsung USB Download Mode interface.",
+            "Close Odin3, Samsung Smart Switch, Heimdall, or other flashing tools that may hold the COM/USB port, then unplug and replug the cable in Download Mode.",
+            detail,
+            data_written,
+        ),
+        TransportError::Timeout | TransportError::ShortWrite { .. } => {
+            if data_written {
+                OdinFailureReport::new(
+                    OdinErrorCategory::UsbDisconnectedOrTimeout,
+                    "USB connection lost mid-flash",
+                    "Data transfer to the device timed out or the USB cable disconnected while flashing.",
+                    "Do not panic and do not force-power-off the device. Leave it in Download Mode, plug the cable firmly into a direct motherboard USB port (avoid hubs), and flash again.",
+                    detail,
+                    true,
+                )
+            } else {
+                OdinFailureReport::new(
+                    OdinErrorCategory::UsbDisconnectedOrTimeout,
+                    "USB communication timed out",
+                    "The device stopped responding before any partitions were written.",
+                    "Reconnect the USB cable or switch to another USB port while keeping the device in Download Mode, then retry.",
+                    detail,
+                    false,
+                )
+            }
+        }
+        _ => OdinFailureReport::new(
+            OdinErrorCategory::UsbDisconnectedOrTimeout,
+            "USB transport error",
+            "USB communication with the device failed.",
+            "Check your USB cable, Samsung USB drivers, and close any conflicting flashing software, then retry.",
+            detail,
+            data_written,
+        ),
+    }
+}
+
+pub fn classify_loke_error(err: &LokeError, data_written: bool) -> OdinFailureReport {
+    let detail = err.to_string();
+    match err {
+        LokeError::AuthFailure => OdinFailureReport::new(
+            OdinErrorCategory::AuthOrAntiRollback,
+            "Bootloader rejected signature (SW REV / Auth)",
+            "The device bootloader rejected the firmware signature or security binary revision (FAIL! Auth).",
+            "Ensure you are flashing official, unmodified firmware for your exact model and that the bootloader binary level (B-number) is equal to or newer than what is on the phone.",
+            detail,
+            data_written,
+        ),
+        LokeError::WriteProtection => OdinFailureReport::new(
+            OdinErrorCategory::StorageWriteFailure,
+            "Partition is write-protected",
+            "The bootloader refused to write to a write-protected storage partition (FAIL! WP).",
+            "Check FRP/Knox/bootloader lock status or verify the loaded binary does not target a locked factory partition.",
+            detail,
+            data_written,
+        ),
+        LokeError::EraseFailure => OdinFailureReport::new(
+            OdinErrorCategory::StorageWriteFailure,
+            "Flash storage erase failed",
+            "The device bootloader failed to erase a flash memory block before writing (FAIL! Erase).",
+            "Keep the device in Download Mode, switch to a direct USB port, and retry the flash. Persistent erase failures can indicate degraded UFS/eMMC storage.",
+            detail,
+            true,
+        ),
+        LokeError::WriteFailure => OdinFailureReport::new(
+            OdinErrorCategory::StorageWriteFailure,
+            "Flash storage write failed",
+            "The device bootloader failed while committing data to internal storage (FAIL! Write).",
+            "Keep the device in Download Mode, reconnect the cable to a direct USB port, and re-flash the complete official BL + AP + CP + CSC set.",
+            detail,
+            true,
+        ),
+        LokeError::SizeLimitExceeded | LokeError::PartitionSizeExceeded => OdinFailureReport::new(
+            OdinErrorCategory::PartitionTableMismatch,
+            "Image exceeds partition size",
+            "An image in the firmware package is larger than the target partition on your device.",
+            "Verify the firmware matches your exact model variant (and regional storage/PIT layout). Avoid mixing files from different regions or carrier variants.",
+            detail,
+            data_written,
+        ),
+        LokeError::Ext4Error => OdinFailureReport::new(
+            OdinErrorCategory::FirmwareCorrupted,
+            "Corrupt filesystem or sparse image",
+            "The bootloader rejected an invalid ext4 or sparse partition image (FAIL! Ext4).",
+            "Re-download and re-extract the official firmware package, verify MD5 checksums, and flash again.",
+            detail,
+            data_written,
+        ),
+        LokeError::PitGptMismatch | LokeError::PartitionNotFound | LokeError::InvalidBinary => {
+            OdinFailureReport::new(
+                OdinErrorCategory::PartitionTableMismatch,
+                "Partition layout mismatch",
+                "The firmware archive does not match the device's partition table (PIT/GPT).",
+                "Double-check that all loaded BL/AP/CP/CSC files come from the same official firmware build for your exact SM-model.",
+                detail,
+                data_written,
+            )
+        }
+        LokeError::UnsupportedDeviceType => OdinFailureReport::new(
+            OdinErrorCategory::StorageWriteFailure,
+            "Unsupported storage device type",
+            "The device bootloader reported an unsupported flash storage type.",
+            "Ensure you are using an official firmware package built for this hardware generation.",
+            detail,
+            data_written,
+        ),
+        LokeError::General(_) | LokeError::Other(_) => OdinFailureReport::new(
+            OdinErrorCategory::StorageWriteFailure,
+            "Bootloader reported failure",
+            "The Samsung LOKE bootloader aborted the operation.",
+            "Keep the device in Download Mode, check the phone's screen for an Odin red error line (such as SW REV CHECK FAIL), and retry with the matching official firmware.",
+            detail,
+            data_written,
+        ),
+    }
+}
+
+pub fn classify_odin_error(err: &OdinError, data_written: bool) -> OdinFailureReport {
+    let detail = err.to_string();
+    match err {
+        OdinError::Loke(loke) => classify_loke_error(loke, data_written),
+        OdinError::Transport(t)
+        | OdinError::HandshakeSendFailed(t)
+        | OdinError::HandshakeReceiveFailed(t)
+        | OdinError::SendCommandFailed(t)
+        | OdinError::ReceivePacketFailed(t) => classify_transport_error(t, data_written),
+        OdinError::ChunkResponseReceiveFailed(inner) => classify_odin_error(inner, data_written),
+        OdinError::HandshakeMismatch { .. }
+        | OdinError::UnexpectedHandshake
+        | OdinError::ResponseTypeMismatch { .. }
+        | OdinError::ChunkIndexMismatch { .. }
+        | OdinError::InvalidResponse(_) => OdinFailureReport::new(
+            OdinErrorCategory::HandshakeOrProtocol,
+            "Odin handshake or protocol error",
+            "The device did not respond with the expected Odin/LOKE protocol message.",
+            "Hold Volume Down + Side button (or re-enter Download Mode cleanly), close other Samsung tools, reconnect USB, and retry.",
+            detail,
+            data_written,
+        ),
+        OdinError::SliceTooLarge { .. } => OdinFailureReport::new(
+            OdinErrorCategory::FirmwareCorrupted,
+            "Firmware slice exceeds bootloader buffer",
+            "A partition slice exceeded the maximum staging memory allowed by the bootloader.",
+            "Verify the firmware files are official and uncorrupted, then retry.",
+            detail,
+            data_written,
+        ),
+        OdinError::DeviceInfoUnavailable | OdinError::DeviceInfoParseFailed(_) => {
+            OdinFailureReport::new(
+                OdinErrorCategory::HandshakeOrProtocol,
+                "Device diagnostics unavailable",
+                "Could not read Download Mode diagnostics from the device.",
+                "Some older or locked bootloaders do not support full diagnostics. Reconnect in Download Mode and retry.",
+                detail,
+                false,
+            )
+        }
+        OdinError::InvalidSalesCode(_) => OdinFailureReport::new(
+            OdinErrorCategory::PreflightBlocked,
+            "Invalid CSC / sales code",
+            "The target CSC sales code must be 3 alphanumeric characters.",
+            "Check the selected CSC package filename and try again.",
+            detail,
+            false,
+        ),
+        _ => OdinFailureReport::new(
+            OdinErrorCategory::Unknown,
+            "Odin protocol error",
+            "An unexpected Odin protocol error occurred.",
+            "Keep the device in Download Mode, reconnect USB, and retry.",
+            detail,
+            data_written,
+        ),
+    }
+}
+
+pub fn classify_flash_error(err: &FlashError, data_written: bool) -> OdinFailureReport {
+    let detail = err.to_string();
+    match err {
+        FlashError::SuperSizeCheckFailed(_) => OdinFailureReport::new(
+            OdinErrorCategory::SuperPartitionFull,
+            "Super partition has insufficient free space",
+            "The device's dynamic `super` partition cannot fit the new OS image while preserving data with HOME_CSC.",
+            "Keep your phone in Download Mode (nothing was flashed yet). Back up your data if needed, then select the regular `CSC_` package instead of `HOME_CSC_` to perform a clean install.",
+            detail,
+            false,
+        ),
+        FlashError::ArchiveCorrupted(pkg, _)
+        | FlashError::Lz4Header(pkg, _)
+        | FlashError::FileReadFailed(pkg, _) => OdinFailureReport::new(
+            OdinErrorCategory::FirmwareCorrupted,
+            "Corrupted or unreadable firmware package",
+            format!("Could not read valid firmware data from \"{pkg}\"."),
+            "Re-download and re-extract the official firmware zip with MD5 verification enabled before flashing.",
+            detail,
+            data_written,
+        ),
+        FlashError::CrossArchiveInconsistency => OdinFailureReport::new(
+            OdinErrorCategory::FirmwareCorrupted,
+            "Mismatched firmware packages",
+            "The selected BL, AP, CP, and CSC archives do not belong to the same firmware build (download-list.txt mismatch).",
+            "Load all slots from the same extracted firmware folder so every file comes from the exact same build.",
+            detail,
+            false,
+        ),
+        FlashError::PitUnpackFailed(_)
+        | FlashError::PartitionNotFound(_)
+        | FlashError::PartitionIdNotFound(_)
+        | FlashError::SkipTargetNotFound(_) => OdinFailureReport::new(
+            OdinErrorCategory::PartitionTableMismatch,
+            "Incompatible partition table (PIT)",
+            "The firmware files could not be matched to the device's PIT partition table.",
+            "Confirm you downloaded the official firmware for your exact Galaxy model number.",
+            detail,
+            false,
+        ),
+        FlashError::PartitionTooSmall(part) => OdinFailureReport::new(
+            OdinErrorCategory::PartitionTableMismatch,
+            "Partition too small for firmware image",
+            format!("The \"{part}\" partition on the device is smaller than the image in your package."),
+            "Check that the firmware package matches your exact device model and storage configuration.",
+            detail,
+            false,
+        ),
+        FlashError::VbmetaRewriteFailed(part, _) => OdinFailureReport::new(
+            OdinErrorCategory::FirmwareCorrupted,
+            "Failed to process vbmeta image",
+            format!("Could not read or process \"{part}\" while preparing the flash."),
+            "Re-extract the official firmware package and try again.",
+            detail,
+            false,
+        ),
+        FlashError::Odin(odin_err) => classify_odin_error(odin_err, data_written),
+        _ => OdinFailureReport::new(
+            OdinErrorCategory::Unknown,
+            "Flash failed",
+            "An unexpected error interrupted the flash workflow.",
+            "Keep your device in Download Mode, check the Flash log for details, and try again.",
+            detail,
+            data_written,
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -511,14 +866,39 @@ fn snapshot_from_device_info(info: &DeviceInfo) -> OdinDeviceSnapshot {
     }
 }
 
+async fn detect_odin_device_active() -> bool {
+    #[cfg(feature = "mock-device")]
+    if crate::mock_device::mock_device_controller().is_enabled() {
+        return crate::mock_device::mock_device_controller().is_download_mode();
+    }
+    detect_device(default_odin_backend(), false).await
+}
+
+async fn open_odin_transport_for_probe() -> std::result::Result<Box<dyn UsbTransfer>, TransportError>
+{
+    #[cfg(feature = "mock-device")]
+    if crate::mock_device::mock_device_controller().is_enabled() {
+        return crate::mock_device::mock_device_controller().open_transport_for_probe();
+    }
+    create_backend(default_odin_backend(), false).await
+}
+
+async fn open_odin_transport_for_flash() -> std::result::Result<Box<dyn UsbTransfer>, TransportError>
+{
+    #[cfg(feature = "mock-device")]
+    if crate::mock_device::mock_device_controller().is_enabled() {
+        return crate::mock_device::mock_device_controller().open_transport_for_flash();
+    }
+    create_backend(default_odin_backend(), false).await
+}
+
 /// Checks if a Samsung device is currently connected in Download Mode and reads `DVIF` metadata.
 pub async fn probe_odin_device() -> Result<Option<OdinDeviceSnapshot>> {
-    let backend = default_odin_backend();
-    if !detect_device(backend, false).await {
+    if !detect_odin_device_active().await {
         return Ok(None);
     }
 
-    let transport = match create_backend(backend, false).await {
+    let transport = match open_odin_transport_for_probe().await {
         Ok(t) => t,
         Err(_) => return Ok(Some(OdinDeviceSnapshot::default())),
     };
@@ -533,14 +913,19 @@ pub async fn probe_odin_device() -> Result<Option<OdinDeviceSnapshot>> {
 
 /// Reboots a normal-mode connected Samsung device into Download Mode via modem AT command.
 pub async fn reboot_connected_to_download_mode() -> Result<DownloadModeReboot> {
+    #[cfg(feature = "mock-device")]
+    if crate::mock_device::mock_device_controller().is_enabled() {
+        return crate::mock_device::mock_device_controller().reboot_to_download_mode();
+    }
     reboot_download(default_odin_backend())
         .await
-        .map_err(|e| BloomError::Odin(format!("Failed to reboot to Download Mode: {e}")))
+        .map_err(|e| BloomError::OdinDetailed(Box::new(classify_transport_error(&e, false))))
 }
 
 struct ReportContext {
     sink: Box<dyn FnMut(OdinProgressEvent) + Send>,
     in_flash_phase: bool,
+    any_partition_started: bool,
     flash_done: u64,
     flash_total: u64,
     part_uncompressed: u64,
@@ -555,6 +940,7 @@ impl ReportContext {
         Self {
             sink,
             in_flash_phase: false,
+            any_partition_started: false,
             flash_done: 0,
             flash_total: 0,
             part_uncompressed: 0,
@@ -693,6 +1079,7 @@ impl FlashProgress for BloomFlashReporter {
                     });
                 }
                 FlashEvent::PartitionStart { name, size } => {
+                    ctx.any_partition_started = true;
                     ctx.part_uncompressed = size;
                     ctx.part_wire_total = size.max(1);
                     ctx.part_wire_sent = 0;
@@ -762,6 +1149,14 @@ fn emit_event(ev: OdinProgressEvent) {
     }
 }
 
+fn flash_has_started_writing() -> bool {
+    REPORT_STATE
+        .get()
+        .and_then(|lock| lock.lock().ok())
+        .and_then(|guard| guard.as_ref().map(|ctx| ctx.any_partition_started))
+        .unwrap_or(false)
+}
+
 /// Runs a strictly safe official Odin firmware flash workflow with MD5 verification and `DVIF`
 /// preflight blocking model mismatch and binary downgrades (or read-only DeviceInfo inspection).
 pub async fn execute_safe_flash<F>(
@@ -791,12 +1186,16 @@ where
 
     let packages = slots.selected_packages();
     if packages.is_empty() {
-        return Err(BloomError::Odin("Select at least one binary package".into()));
+        return Err(BloomError::OdinDetailed(Box::new(
+            odin_preflight_failure_report("Select at least one binary package".to_owned()),
+        )));
     }
 
     for issue in validate_odin_preflight(&slots, None) {
         if let OdinSafetyIssue::Blocked(msg) = issue {
-            return Err(BloomError::Odin(msg));
+            return Err(BloomError::OdinDetailed(Box::new(
+                odin_preflight_failure_report(msg),
+            )));
         }
     }
 
@@ -829,7 +1228,16 @@ where
             .and_then(|s| s.to_str())
             .unwrap_or("package.tar")
             .to_owned();
-        let file = File::open(path)?;
+        let file = File::open(path).map_err(|e| {
+            BloomError::OdinDetailed(Box::new(OdinFailureReport::new(
+                OdinErrorCategory::FirmwareCorrupted,
+                "Cannot open firmware file",
+                format!("Failed to open \"{fname}\"."),
+                "Verify the file still exists and is readable, then load it again.",
+                e.to_string(),
+                false,
+            )))
+        })?;
         opened.push((fname, AllowStdIo::new(file)));
     }
 
@@ -844,14 +1252,14 @@ where
         .reboot_mode(reboot_mode)
         .prepare()
         .await
-        .map_err(|e| BloomError::Odin(format!("Failed to prepare firmware: {e}")))?;
+        .map_err(|e| BloomError::OdinDetailed(Box::new(classify_flash_error(&e, false))))?;
 
     emit_event(OdinProgressEvent::Stage(OdinFlashStage::Connecting));
     emit_event(OdinProgressEvent::Log("Connecting to Download Mode device...".into()));
 
-    let transport = create_backend(default_odin_backend(), false)
+    let transport = open_odin_transport_for_flash()
         .await
-        .map_err(|e| BloomError::Odin(format!("Download Mode device not ready: {e}")))?;
+        .map_err(|e| BloomError::OdinDetailed(Box::new(classify_transport_error(&e, false))))?;
 
     let mut connection = OdinConnection::open(transport);
     if let Ok(dev_info) = connection.query_device_info().await {
@@ -863,7 +1271,9 @@ where
                     emit_event(OdinProgressEvent::Log(format!("Warning: {msg}")));
                 }
                 OdinSafetyIssue::Blocked(msg) => {
-                    return Err(BloomError::Odin(msg));
+                    return Err(BloomError::OdinDetailed(Box::new(
+                        odin_preflight_failure_report(msg),
+                    )));
                 }
             }
         }
@@ -873,13 +1283,15 @@ where
     let mut session = connection
         .begin_session()
         .await
-        .map_err(|e| BloomError::Odin(format!("Odin handshake failed: {e}")))?;
+        .map_err(|e| BloomError::OdinDetailed(Box::new(classify_odin_error(&e, false))))?;
 
     emit_event(OdinProgressEvent::Stage(OdinFlashStage::Flashing));
-    prepared
-        .execute(&mut session)
-        .await
-        .map_err(|e| BloomError::Odin(format!("Flash failed: {e}")))?;
+    prepared.execute(&mut session).await.map_err(|e| {
+        BloomError::OdinDetailed(Box::new(classify_flash_error(
+            &e,
+            flash_has_started_writing(),
+        )))
+    })?;
 
     emit_event(OdinProgressEvent::Stage(OdinFlashStage::Completed));
     emit_event(OdinProgressEvent::Log("All threads completed".into()));
@@ -892,9 +1304,9 @@ async fn execute_device_info_only() -> Result<()> {
         "DeviceInfo only: reading device details (no flash)...".into(),
     ));
 
-    let transport = create_backend(default_odin_backend(), false)
+    let transport = open_odin_transport_for_flash()
         .await
-        .map_err(|e| BloomError::Odin(format!("Download Mode device not ready: {e}")))?;
+        .map_err(|e| BloomError::OdinDetailed(Box::new(classify_transport_error(&e, false))))?;
 
     let mut connection = OdinConnection::open(transport);
     if let Ok(dev_info) = connection.query_device_info().await {
@@ -909,7 +1321,7 @@ async fn execute_device_info_only() -> Result<()> {
     let mut session = connection
         .begin_session()
         .await
-        .map_err(|e| BloomError::Odin(format!("Odin handshake failed: {e}")))?;
+        .map_err(|e| BloomError::OdinDetailed(Box::new(classify_odin_error(&e, false))))?;
 
     emit_event(OdinProgressEvent::Log(format!(
         "Bootloader protocol v{} (LZ4: {})",
@@ -1041,5 +1453,43 @@ mod tests {
         assert!(issues
             .iter()
             .any(|i| matches!(i, OdinSafetyIssue::Blocked(m) if m.contains("Downgrade blocked"))));
+    }
+
+    #[test]
+    fn classifies_odin_and_flash_errors_with_safe_recovery() {
+        let super_err = FlashError::SuperSizeCheckFailed(OdinError::Loke(LokeError::General(-1)));
+        let super_rep = classify_flash_error(&super_err, true);
+        assert_eq!(super_rep.category, OdinErrorCategory::SuperPartitionFull);
+        assert!(!super_rep.data_written);
+        assert!(super_rep.recovery.contains("CSC_"));
+
+        let auth_rep = classify_loke_error(&LokeError::AuthFailure, true);
+        assert_eq!(auth_rep.category, OdinErrorCategory::AuthOrAntiRollback);
+        assert!(auth_rep.data_written);
+        assert!(auth_rep.title.contains("Auth"));
+
+        let timeout_before = classify_transport_error(&TransportError::Timeout, false);
+        assert_eq!(
+            timeout_before.category,
+            OdinErrorCategory::UsbDisconnectedOrTimeout
+        );
+        assert!(!timeout_before.data_written);
+
+        let timeout_mid = classify_odin_error(
+            &OdinError::ChunkResponseReceiveFailed(Box::new(OdinError::ReceivePacketFailed(
+                TransportError::Timeout,
+            ))),
+            true,
+        );
+        assert_eq!(
+            timeout_mid.category,
+            OdinErrorCategory::UsbDisconnectedOrTimeout
+        );
+        assert!(timeout_mid.data_written);
+        assert!(timeout_mid.recovery.contains("Download Mode"));
+
+        let busy = classify_transport_error(&TransportError::InterfaceClaimFailed, false);
+        assert_eq!(busy.category, OdinErrorCategory::UsbBusyOrDriver);
+        assert!(!busy.data_written);
     }
 }

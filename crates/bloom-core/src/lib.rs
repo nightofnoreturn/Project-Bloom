@@ -6,6 +6,8 @@ pub mod downloader;
 pub mod error;
 pub mod fus;
 pub mod history;
+#[cfg(feature = "mock-device")]
+pub mod mock_device;
 pub mod odin;
 pub mod planner;
 pub mod renders;
@@ -43,12 +45,13 @@ pub use history::{
     ChangelogLang, DecodedBuildCode, FirmwareUpdateType, HistoryItem, HistoryResult,
 };
 pub use odin::{
+    classify_flash_error, classify_loke_error, classify_odin_error, classify_transport_error,
     default_flash_options_ini_path, default_odin_backend, delete_flash_options_ini,
     execute_safe_flash, extract_binary_from_build, extract_model_and_binary_from_slots,
     load_flash_options_ini, probe_odin_device, reboot_connected_to_download_mode,
     save_flash_options_ini, validate_odin_preflight, verify_odin_package_md5, DownloadModeReboot,
-    OdinCscMode, OdinDeviceSnapshot, OdinFirmwareSlots, OdinFlashOptions, OdinFlashStage,
-    OdinProgressEvent, OdinSafetyIssue, OdinSlotKind,
+    OdinCscMode, OdinDeviceSnapshot, OdinErrorCategory, OdinFailureReport, OdinFirmwareSlots,
+    OdinFlashOptions, OdinFlashStage, OdinProgressEvent, OdinSafetyIssue, OdinSlotKind,
 };
 pub use planner::{
     ClaimResult, SegmentAssignment, SegmentPlanner, SegmentProgress, SegmentState,

@@ -63,6 +63,9 @@ pub enum BloomError {
 
     #[error("Odin flash error: {0}")]
     Odin(String),
+
+    #[error("{0}")]
+    OdinDetailed(Box<crate::odin::OdinFailureReport>),
 }
 
 pub type Result<T> = std::result::Result<T, BloomError>;

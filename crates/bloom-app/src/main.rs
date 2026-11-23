@@ -2,6 +2,8 @@
 
 mod download_window;
 mod firmware_info;
+#[cfg(feature = "mock-device")]
+mod mock_device_window;
 mod pages;
 mod state;
 mod tasks;
@@ -249,7 +251,7 @@ pub struct BloomApp {
     pub flash_md5_error_dialog_open: bool,
     pub flash_md5_error_dialog_msg: String,
     pub flash_error_dialog_open: bool,
-    pub flash_error_dialog_msg: String,
+    pub flash_error_dialog: state::FlashErrorDialogState,
     pub flash_complete_dialog_open: bool,
     pub flash_complete_dialog_msg: String,
     pub flash_pending_folder_slots: Option<OdinFirmwareSlots>,
@@ -267,6 +269,18 @@ pub struct BloomApp {
     pub toast: TwoUiToastState,
     pub snackbar: TwoUiSnackBarState,
     pub active_snack_action: Option<SnackAction>,
+
+    #[cfg(feature = "mock-device")]
+    pub mock_window_open: bool,
+    #[cfg(feature = "mock-device")]
+    pub mock_last_seen_rev: u64,
+    #[cfg(feature = "mock-device")]
+    pub mock_dummy_status: Option<(
+        String,
+        std::path::PathBuf,
+        Option<std::path::PathBuf>,
+        bloom_core::mock_device::MockDummyFirmwareKind,
+    )>,
 }
 
 impl BloomApp {
@@ -414,7 +428,7 @@ impl BloomApp {
             flash_md5_error_dialog_open: false,
             flash_md5_error_dialog_msg: String::new(),
             flash_error_dialog_open: false,
-            flash_error_dialog_msg: String::new(),
+            flash_error_dialog: state::FlashErrorDialogState::default(),
             flash_complete_dialog_open: false,
             flash_complete_dialog_msg: String::new(),
             flash_pending_folder_slots: None,
@@ -431,6 +445,13 @@ impl BloomApp {
             toast: TwoUiToastState::default(),
             snackbar: TwoUiSnackBarState::default(),
             active_snack_action: None,
+
+            #[cfg(feature = "mock-device")]
+            mock_window_open: true,
+            #[cfg(feature = "mock-device")]
+            mock_last_seen_rev: 0,
+            #[cfg(feature = "mock-device")]
+            mock_dummy_status: None,
         };
 
         app.sync_theme(&cc.egui_ctx);
@@ -571,7 +592,7 @@ impl eframe::App for BloomApp {
             device_has_update: Vec<bool>,
             active_download_count: usize,
             newly_completed: usize,
-            flash_error_pending: Option<String>,
+            flash_error_pending: Option<state::FlashErrorDialogState>,
             flash_complete_pending: Option<String>,
             flash_verifying_md5: bool,
             flash_flashing: bool,
@@ -667,8 +688,8 @@ impl eframe::App for BloomApp {
             self.toast.show_message(ui.ctx(), msg, 2.8);
         }
 
-        if let Some(err_msg) = flash_error_pending {
-            self.flash_error_dialog_msg = err_msg;
+        if let Some(err_dlg) = flash_error_pending {
+            self.flash_error_dialog = err_dlg;
             self.flash_error_dialog_open = true;
         }
         if let Some(done_msg) = flash_complete_pending {
@@ -681,6 +702,31 @@ impl eframe::App for BloomApp {
             spawn_scan_adb_devices(&self.rt, Arc::clone(&self.shared), ui.ctx().clone());
         }
         ui.ctx().request_repaint_after(Duration::from_secs(3));
+
+        #[cfg(feature = "mock-device")]
+        {
+            if ui
+                .ctx()
+                .input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::M))
+            {
+                self.mock_window_open = true;
+                ui.ctx().send_viewport_cmd_to(
+                    egui::ViewportId::from_hash_of("bloom_mock_device_win"),
+                    egui::ViewportCommand::Focus,
+                );
+            }
+            let rev = bloom_core::mock_device::mock_device_controller().revision();
+            if rev != self.mock_last_seen_rev
+                && !self.shared.lock().map(|g| g.usb_scanning).unwrap_or(false)
+            {
+                self.mock_last_seen_rev = rev;
+                self.last_usb_scan = Instant::now();
+                spawn_scan_adb_devices(&self.rt, Arc::clone(&self.shared), ui.ctx().clone());
+            }
+            if self.mock_window_open {
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+            }
+        }
 
         // Notify user via SuggestiveSnackBar when a Samsung device newly connects or enables ADB / Download mode.
         let newly_notifiable = connected_devices.iter().find(|d| {
@@ -1386,11 +1432,79 @@ impl eframe::App for BloomApp {
             .show(ui.ctx(), &mut self.flash_md5_error_dialog_open, |_| {});
 
         // 6. Crucial error dialog for Odin flash failures
-        let flash_err_body = self.flash_error_dialog_msg.clone();
-        let _ = TwoUiDialog::new("bloom_flash_error_dialog", "Flash failed")
-            .body(&flash_err_body)
+        let flash_err = self.flash_error_dialog.clone();
+        let flash_err_title = if flash_err.title.trim().is_empty() {
+            "Flash failed".to_owned()
+        } else {
+            flash_err.title.clone()
+        };
+        let p_err = &theme.palette;
+        let _ = TwoUiDialog::new("bloom_flash_error_dialog", &flash_err_title)
+            .width(450.0)
             .action(DialogAction::primary("OK"))
-            .show(ui.ctx(), &mut self.flash_error_dialog_open, |_| {});
+            .show(ui.ctx(), &mut self.flash_error_dialog_open, |ui| {
+                let (badge_bg, badge_fg, badge_text) = if flash_err.data_written {
+                    (
+                        p_err.functional_red.gamma_multiply(0.16),
+                        p_err.functional_red,
+                        "Interrupted mid-flash — keep device in Download mode",
+                    )
+                } else {
+                    (
+                        p_err.functional_green.gamma_multiply(0.16),
+                        p_err.functional_green,
+                        "Device untouched — no data was written",
+                    )
+                };
+                egui::Frame::NONE
+                    .fill(badge_bg)
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(badge_text)
+                                .font(font_id(ui, 12.5, TwoUiFontWeight::SemiBold))
+                                .color(badge_fg),
+                        );
+                    });
+                ui.add_space(10.0);
+                if !flash_err.summary.trim().is_empty() {
+                    ui.label(
+                        egui::RichText::new(&flash_err.summary)
+                            .font(font_id(ui, 14.0, TwoUiFontWeight::Regular))
+                            .color(p_err.text_primary),
+                    );
+                }
+                if !flash_err.recovery.trim().is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("What to do next")
+                            .font(font_id(ui, 13.0, TwoUiFontWeight::SemiBold))
+                            .color(p_err.text_primary),
+                    );
+                    ui.add_space(3.0);
+                    ui.label(
+                        egui::RichText::new(&flash_err.recovery)
+                            .font(font_id(ui, 13.0, TwoUiFontWeight::Regular))
+                            .color(p_err.text_secondary),
+                    );
+                }
+                if !flash_err.technical_detail.trim().is_empty() {
+                    ui.add_space(10.0);
+                    egui::Frame::NONE
+                        .fill(p_err.surface_container)
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new(&flash_err.technical_detail)
+                                    .font(egui::FontId::new(11.5, egui::FontFamily::Monospace))
+                                    .color(p_err.text_muted),
+                            );
+                        });
+                }
+            });
 
         // 9. CSC choice suggestive dialog when folder has both HOME_CSC and CSC
         if let Some(idx) = TwoUiSuggestiveDialog::new(
@@ -1521,6 +1635,8 @@ impl eframe::App for BloomApp {
         }
 
         self.render_download_windows(ui.ctx());
+        #[cfg(feature = "mock-device")]
+        self.render_mock_device_window(ui.ctx());
 
         if self.last_rendered_page_id == BloomPage::Flash.id()
             && self.page_id != BloomPage::Flash.id()

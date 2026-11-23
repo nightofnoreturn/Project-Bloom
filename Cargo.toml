@@ -14,6 +14,7 @@ repository = "https://github.com/nightofnoreturn/Project-Bloom"
 
 [workspace.dependencies]
 aes = "0.9"
+async-trait = "0.1"
 base64 = "0.23"
 clap = { version = "4.6", features = ["derive"] }
 crc32fast = "1.5"

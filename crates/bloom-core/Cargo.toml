@@ -6,8 +6,13 @@ license.workspace = true
 repository.workspace = true
 description = "High-performance native Samsung FUS firmware client, resumable multi-connection downloader, and parallel AES-NI decrypter."
 
+[features]
+default = []
+mock-device = ["dep:async-trait"]
+
 [dependencies]
 aes.workspace = true
+async-trait = { workspace = true, optional = true }
 base64.workspace = true
 crc32fast.workspace = true
 futures-util.workspace = true

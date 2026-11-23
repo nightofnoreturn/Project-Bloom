@@ -300,6 +300,40 @@ pub type PendingMd5Result = (
     std::result::Result<(), String>,
 );
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlashErrorDialogState {
+    pub title: String,
+    pub summary: String,
+    pub recovery: String,
+    pub technical_detail: String,
+    pub data_written: bool,
+}
+
+impl FlashErrorDialogState {
+    pub fn from_plain(msg: String) -> Self {
+        Self {
+            title: "Flash failed".to_owned(),
+            summary: msg,
+            recovery: "Keep your device in Download Mode, check the Flash log, and try again."
+                .to_owned(),
+            technical_detail: String::new(),
+            data_written: false,
+        }
+    }
+}
+
+impl From<bloom_core::OdinFailureReport> for FlashErrorDialogState {
+    fn from(r: bloom_core::OdinFailureReport) -> Self {
+        Self {
+            title: r.title,
+            summary: r.summary,
+            recovery: r.recovery,
+            technical_detail: r.technical_detail,
+            data_written: r.data_written,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FlashUiState {
     pub session_gen: u64,
@@ -316,7 +350,7 @@ pub struct FlashUiState {
     pub current_bytes: u64,
     pub total_bytes: u64,
     pub logs: Vec<String>,
-    pub pending_error_dialog: Option<String>,
+    pub pending_error_dialog: Option<FlashErrorDialogState>,
     pub pending_complete_dialog: Option<String>,
 }
 

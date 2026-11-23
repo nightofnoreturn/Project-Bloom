@@ -17,7 +17,8 @@ use bloom_core::{
 
 use crate::state::{
     current_local_ymd, derive_decrypted_output, save_downloads_history, DecryptForm,
-    DeviceRenderState, DownloadJobRecord, FirmwareBinaryInfoState, SharedUiState, SnackAction,
+    DeviceRenderState, DownloadJobRecord, FirmwareBinaryInfoState, FlashErrorDialogState,
+    SharedUiState, SnackAction,
 };
 
 pub fn spawn_manual_decrypt(
@@ -1192,11 +1193,23 @@ pub fn spawn_odin_flash(
                     }
                 }
                 Err(err) => {
-                    let msg = err.to_string();
+                    let dlg = match err {
+                        BloomError::OdinDetailed(report) => FlashErrorDialogState::from(*report),
+                        other => FlashErrorDialogState::from_plain(other.to_string()),
+                    };
                     guard.flash.stage = OdinFlashStage::Failed;
                     guard.flash.active_log_line = None;
-                    guard.flash.pending_error_dialog = Some(msg.clone());
-                    push_flash_log(&mut guard.flash.logs, format!("Error: {msg}"));
+                    push_flash_log(
+                        &mut guard.flash.logs,
+                        format!("Error: {} — {}", dlg.title, dlg.summary),
+                    );
+                    if !dlg.technical_detail.is_empty() && dlg.technical_detail != dlg.summary {
+                        push_flash_log(
+                            &mut guard.flash.logs,
+                            format!("Detail: {}", dlg.technical_detail),
+                        );
+                    }
+                    guard.flash.pending_error_dialog = Some(dlg);
                 }
             }
         }

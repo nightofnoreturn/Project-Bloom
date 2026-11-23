@@ -2,7 +2,7 @@ name: Build & Test Bloom
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, "test/*"]
     tags: ["v*"]
   pull_request:
     branches: [main, master]
@@ -25,12 +25,14 @@ jobs:
             cli_dst: bloom-cli-windows-x86_64.exe
             app_src: target/release/bloom-app.exe
             app_dst: bloom-windows-x86_64.exe
+            mock_app_dst: bloom-mock-windows-x86_64.exe
           - os: ubuntu-latest
             artifact_name: bloom-linux-x86_64
             cli_src: target/release/bloom
             cli_dst: bloom-cli-linux-x86_64
             app_src: target/release/bloom-app
             app_dst: bloom-linux-x86_64
+            mock_app_dst: bloom-mock-linux-x86_64
 
     steps:
       - name: Checkout repository
@@ -58,25 +60,52 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run unit tests
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          cargo test --workspace
+          cargo test -p bloom-core --features mock-device
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets
+        shell: bash
+        run: |
+          cargo clippy --workspace --all-targets
+          cargo clippy -p bloom-core --all-targets --features mock-device
+          cargo clippy -p bloom-app --all-targets --features mock-device
 
       - name: Build release binaries (GUI & CLI)
+        if: "!startsWith(github.ref_name, 'test/')"
         run: cargo build --release --workspace
+
+      - name: Build release binaries with mock-device (GUI & CLI)
+        if: startsWith(github.ref_name, 'test/')
+        shell: bash
+        run: |
+          cargo build --release -p bloom-cli
+          cargo build --release -p bloom-app --features mock-device
 
       - name: Stage release artifacts
         shell: bash
         run: |
           mkdir -p dist
-          cp "${{ matrix.app_src }}" "dist/${{ matrix.app_dst }}"
+          if [[ "${{ github.ref_name }}" == test/* ]]; then
+            cp "${{ matrix.app_src }}" "dist/${{ matrix.mock_app_dst }}"
+          else
+            cp "${{ matrix.app_src }}" "dist/${{ matrix.app_dst }}"
+          fi
           cp "${{ matrix.cli_src }}" "dist/${{ matrix.cli_dst }}"
 
       - name: Upload build artifacts
+        if: "!startsWith(github.ref_name, 'test/')"
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}
+          path: dist/
+
+      - name: Upload mock build artifacts
+        if: startsWith(github.ref_name, 'test/')
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact_name }}-mock
           path: dist/
 
       - name: Publish GitHub Release (on v* tags)
