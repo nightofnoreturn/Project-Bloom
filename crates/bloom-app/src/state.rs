@@ -306,18 +306,22 @@ pub struct FlashUiState {
     pub device_connected: bool,
     pub device_info: Option<bloom_core::OdinDeviceSnapshot>,
     pub rebooting_to_dl: bool,
-    pub verifying_md5: bool,
+    pub verifying_md5_slots: HashSet<bloom_core::OdinSlotKind>,
     pub verified_md5_paths: HashSet<PathBuf>,
     pub pending_md5_results: Vec<PendingMd5Result>,
     pub flashing: bool,
     pub stage: bloom_core::OdinFlashStage,
-    pub current_partition: Option<String>,
+    pub active_log_line: Option<String>,
     pub current_bytes: u64,
     pub total_bytes: u64,
     pub logs: Vec<String>,
-    pub last_error: Option<String>,
     pub pending_error_dialog: Option<String>,
-    pub completed_ok: bool,
+}
+
+impl FlashUiState {
+    pub fn is_verifying_md5(&self) -> bool {
+        !self.verifying_md5_slots.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -355,7 +359,7 @@ impl SharedUiState {
         self.decrypting
             || self.my_device_builds_loading
             || self.flash.flashing
-            || self.flash.verifying_md5
+            || self.flash.is_verifying_md5()
     }
 }
 

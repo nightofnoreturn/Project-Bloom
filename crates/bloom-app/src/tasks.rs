@@ -966,7 +966,6 @@ pub fn spawn_reboot_to_download_mode(
             return;
         }
         guard.flash.rebooting_to_dl = true;
-        guard.flash.last_error = None;
         guard
             .connected_devices
             .iter()
@@ -1004,7 +1003,7 @@ pub fn spawn_reboot_to_download_mode(
                             "Rebooting to Download Mode...",
                         ),
                     };
-                    guard.flash.logs.push(log_msg.to_owned());
+                    push_flash_log(&mut guard.flash.logs, log_msg.to_owned());
                     guard.pending_toast = Some(toast_msg.to_owned());
                 }
                 ctx.request_repaint();
@@ -1019,8 +1018,7 @@ pub fn spawn_reboot_to_download_mode(
             Err(err) => {
                 if let Ok(mut guard) = shared.lock() {
                     let msg = err.to_string();
-                    guard.flash.last_error = Some(msg.clone());
-                    guard.flash.logs.push(msg.clone());
+                    push_flash_log(&mut guard.flash.logs, msg.clone());
                     guard.pending_toast = Some(msg);
                 }
             }
@@ -1039,76 +1037,71 @@ fn push_flash_log(logs: &mut Vec<String>, msg: String) {
     logs.push(msg);
 }
 
-pub fn spawn_verify_odin_packages_md5(
+pub fn spawn_verify_odin_slot_md5(
     rt: &tokio::runtime::Runtime,
     shared: Arc<Mutex<SharedUiState>>,
     ctx: egui::Context,
-    items: Vec<(OdinSlotKind, PathBuf)>,
+    slot: OdinSlotKind,
+    path: PathBuf,
 ) {
-    if items.is_empty() {
-        return;
-    }
     if let Ok(mut guard) = shared.lock() {
-        if guard.flash.verifying_md5 || guard.flash.flashing {
+        if guard.flash.flashing || !guard.flash.verifying_md5_slots.insert(slot) {
             return;
         }
-        guard.flash.verifying_md5 = true;
+    } else {
+        return;
+    }
+
+    let fname = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("package")
+        .to_owned();
+    let is_md5 = fname.to_ascii_lowercase().ends_with(".md5");
+    if is_md5 {
+        if let Ok(mut guard) = shared.lock() {
+            push_flash_log(
+                &mut guard.flash.logs,
+                format!("Checking MD5 ({}): {fname}...", slot.label()),
+            );
+        }
     }
     ctx.request_repaint();
 
     rt.spawn(async move {
-        for (slot, path) in items {
-            let fname = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("package")
-                .to_owned();
-            let is_md5 = fname.to_ascii_lowercase().ends_with(".md5");
-            if is_md5 {
-                if let Ok(mut guard) = shared.lock() {
-                    push_flash_log(
-                        &mut guard.flash.logs,
-                        format!("Checking MD5 ({}): {fname}...", slot.label()),
-                    );
-                }
-                ctx.request_repaint();
-            }
-
-            let res = if is_md5 {
-                verify_odin_package_md5(&path).await
-            } else {
-                Ok(())
-            };
-
-            if let Ok(mut guard) = shared.lock() {
-                match res {
-                    Ok(()) => {
-                        if is_md5 {
-                            guard.flash.verified_md5_paths.insert(path.clone());
-                            push_flash_log(&mut guard.flash.logs, format!("MD5 OK: {fname}"));
-                        } else {
-                            push_flash_log(
-                                &mut guard.flash.logs,
-                                format!("Added {}: {fname}", slot.label()),
-                            );
-                        }
-                        guard.flash.pending_md5_results.push((slot, path, Ok(())));
-                    }
-                    Err(err) => {
-                        let err_str = err.to_string();
-                        push_flash_log(&mut guard.flash.logs, format!("MD5 error: {fname} is invalid"));
-                        guard
-                            .flash
-                            .pending_md5_results
-                            .push((slot, path, Err(err_str)));
-                    }
-                }
-            }
-            ctx.request_repaint();
-        }
+        let res = if is_md5 {
+            verify_odin_package_md5(&path).await
+        } else {
+            Ok(())
+        };
 
         if let Ok(mut guard) = shared.lock() {
-            guard.flash.verifying_md5 = false;
+            guard.flash.verifying_md5_slots.remove(&slot);
+            match res {
+                Ok(()) => {
+                    if is_md5 {
+                        guard.flash.verified_md5_paths.insert(path.clone());
+                        push_flash_log(&mut guard.flash.logs, format!("MD5 OK: {fname}"));
+                    } else {
+                        push_flash_log(
+                            &mut guard.flash.logs,
+                            format!("Added {}: {fname}", slot.label()),
+                        );
+                    }
+                    guard.flash.pending_md5_results.push((slot, path, Ok(())));
+                }
+                Err(err) => {
+                    let err_str = err.to_string();
+                    push_flash_log(
+                        &mut guard.flash.logs,
+                        format!("MD5 error: {fname} is invalid"),
+                    );
+                    guard
+                        .flash
+                        .pending_md5_results
+                        .push((slot, path, Err(err_str)));
+                }
+            }
         }
         ctx.request_repaint();
     });
@@ -1122,18 +1115,16 @@ pub fn spawn_odin_flash(
     options: OdinFlashOptions,
 ) {
     let verified_paths = if let Ok(mut guard) = shared.lock() {
-        if guard.flash.flashing || guard.flash.verifying_md5 {
+        if guard.flash.flashing || guard.flash.is_verifying_md5() {
             return;
         }
         guard.flash.flashing = true;
         guard.flash.stage = OdinFlashStage::Preparing;
-        guard.flash.current_partition = None;
+        guard.flash.active_log_line = None;
         guard.flash.current_bytes = 0;
         guard.flash.total_bytes = 0;
         guard.flash.logs.clear();
-        guard.flash.last_error = None;
         guard.flash.pending_error_dialog = None;
-        guard.flash.completed_ok = false;
         guard.flash.verified_md5_paths.clone()
     } else {
         return;
@@ -1151,6 +1142,7 @@ pub fn spawn_odin_flash(
                         guard.flash.stage = st;
                     }
                     OdinProgressEvent::Log(msg) => {
+                        guard.flash.active_log_line = Some(msg.clone());
                         push_flash_log(&mut guard.flash.logs, msg);
                     }
                     OdinProgressEvent::DeviceInfo(snap) => {
@@ -1161,18 +1153,13 @@ pub fn spawn_odin_flash(
                         guard.flash.total_bytes = total_bytes;
                         guard.flash.current_bytes = 0;
                     }
-                    OdinProgressEvent::PartitionStart { name, .. } => {
-                        guard.flash.current_partition = Some(name);
-                    }
-                    OdinProgressEvent::PartitionDone(_) => {}
-                    OdinProgressEvent::Md5Start { name, size } => {
-                        guard.flash.current_partition = Some(format!("MD5 · {name}"));
+                    OdinProgressEvent::PartitionStart { .. }
+                    | OdinProgressEvent::PartitionDone(_) => {}
+                    OdinProgressEvent::Md5Start { size, .. } => {
                         guard.flash.current_bytes = 0;
                         guard.flash.total_bytes = size;
                     }
-                    OdinProgressEvent::Md5Done(_) => {
-                        guard.flash.current_partition = None;
-                    }
+                    OdinProgressEvent::Md5Done(_) => {}
                     OdinProgressEvent::BytesProgress { current, total } => {
                         guard.flash.current_bytes = current;
                         guard.flash.total_bytes = total;
@@ -1185,20 +1172,22 @@ pub fn spawn_odin_flash(
 
         if let Ok(mut guard) = shared.lock() {
             guard.flash.flashing = false;
-            guard.flash.current_partition = None;
             match result {
                 Ok(()) => {
                     guard.flash.stage = OdinFlashStage::Completed;
-                    guard.flash.completed_ok = true;
-                    guard.pending_toast = Some("Flash completed".to_owned());
+                    guard.flash.active_log_line = Some("Completed".to_owned());
+                    guard.pending_toast = Some(if options.device_info_only {
+                        "DeviceInfo check completed".to_owned()
+                    } else {
+                        "Flash completed".to_owned()
+                    });
                 }
                 Err(err) => {
                     let msg = err.to_string();
                     guard.flash.stage = OdinFlashStage::Failed;
-                    guard.flash.completed_ok = false;
-                    guard.flash.last_error = Some(msg.clone());
+                    guard.flash.active_log_line = None;
                     guard.flash.pending_error_dialog = Some(msg.clone());
-                    guard.flash.logs.push(format!("Error: {msg}"));
+                    push_flash_log(&mut guard.flash.logs, format!("Error: {msg}"));
                 }
             }
         }
