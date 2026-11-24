@@ -1432,79 +1432,16 @@ impl eframe::App for BloomApp {
             .show(ui.ctx(), &mut self.flash_md5_error_dialog_open, |_| {});
 
         // 6. Crucial error dialog for Odin flash failures
-        let flash_err = self.flash_error_dialog.clone();
-        let flash_err_title = if flash_err.title.trim().is_empty() {
+        let flash_err_title = if self.flash_error_dialog.title.trim().is_empty() {
             "Flash failed".to_owned()
         } else {
-            flash_err.title.clone()
+            self.flash_error_dialog.title.clone()
         };
-        let p_err = &theme.palette;
+        let flash_err_body = self.flash_error_dialog.body.clone();
         let _ = TwoUiDialog::new("bloom_flash_error_dialog", &flash_err_title)
-            .width(450.0)
+            .body(&flash_err_body)
             .action(DialogAction::primary("OK"))
-            .show(ui.ctx(), &mut self.flash_error_dialog_open, |ui| {
-                let (badge_bg, badge_fg, badge_text) = if flash_err.data_written {
-                    (
-                        p_err.functional_red.gamma_multiply(0.16),
-                        p_err.functional_red,
-                        "Interrupted mid-flash — keep device in Download mode",
-                    )
-                } else {
-                    (
-                        p_err.functional_green.gamma_multiply(0.16),
-                        p_err.functional_green,
-                        "Device untouched — no data was written",
-                    )
-                };
-                egui::Frame::NONE
-                    .fill(badge_bg)
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(egui::Margin::symmetric(10, 6))
-                    .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(badge_text)
-                                .font(font_id(ui, 12.5, TwoUiFontWeight::SemiBold))
-                                .color(badge_fg),
-                        );
-                    });
-                ui.add_space(10.0);
-                if !flash_err.summary.trim().is_empty() {
-                    ui.label(
-                        egui::RichText::new(&flash_err.summary)
-                            .font(font_id(ui, 14.0, TwoUiFontWeight::Regular))
-                            .color(p_err.text_primary),
-                    );
-                }
-                if !flash_err.recovery.trim().is_empty() {
-                    ui.add_space(10.0);
-                    ui.label(
-                        egui::RichText::new("What to do next")
-                            .font(font_id(ui, 13.0, TwoUiFontWeight::SemiBold))
-                            .color(p_err.text_primary),
-                    );
-                    ui.add_space(3.0);
-                    ui.label(
-                        egui::RichText::new(&flash_err.recovery)
-                            .font(font_id(ui, 13.0, TwoUiFontWeight::Regular))
-                            .color(p_err.text_secondary),
-                    );
-                }
-                if !flash_err.technical_detail.trim().is_empty() {
-                    ui.add_space(10.0);
-                    egui::Frame::NONE
-                        .fill(p_err.surface_container)
-                        .corner_radius(CornerRadius::same(8))
-                        .inner_margin(egui::Margin::symmetric(10, 8))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.label(
-                                egui::RichText::new(&flash_err.technical_detail)
-                                    .font(egui::FontId::new(11.5, egui::FontFamily::Monospace))
-                                    .color(p_err.text_muted),
-                            );
-                        });
-                }
-            });
+            .show(ui.ctx(), &mut self.flash_error_dialog_open, |_| {});
 
         // 9. CSC choice suggestive dialog when folder has both HOME_CSC and CSC
         if let Some(idx) = TwoUiSuggestiveDialog::new(

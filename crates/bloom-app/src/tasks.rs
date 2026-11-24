@@ -1201,14 +1201,8 @@ pub fn spawn_odin_flash(
                     guard.flash.active_log_line = None;
                     push_flash_log(
                         &mut guard.flash.logs,
-                        format!("Error: {} — {}", dlg.title, dlg.summary),
+                        format!("Error: {} — {}", dlg.title, dlg.body),
                     );
-                    if !dlg.technical_detail.is_empty() && dlg.technical_detail != dlg.summary {
-                        push_flash_log(
-                            &mut guard.flash.logs,
-                            format!("Detail: {}", dlg.technical_detail),
-                        );
-                    }
                     guard.flash.pending_error_dialog = Some(dlg);
                 }
             }

@@ -303,21 +303,14 @@ pub type PendingMd5Result = (
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FlashErrorDialogState {
     pub title: String,
-    pub summary: String,
-    pub recovery: String,
-    pub technical_detail: String,
-    pub data_written: bool,
+    pub body: String,
 }
 
 impl FlashErrorDialogState {
     pub fn from_plain(msg: String) -> Self {
         Self {
             title: "Flash failed".to_owned(),
-            summary: msg,
-            recovery: "Keep your device in Download Mode, check the Flash log, and try again."
-                .to_owned(),
-            technical_detail: String::new(),
-            data_written: false,
+            body: msg,
         }
     }
 }
@@ -326,10 +319,7 @@ impl From<bloom_core::OdinFailureReport> for FlashErrorDialogState {
     fn from(r: bloom_core::OdinFailureReport) -> Self {
         Self {
             title: r.title,
-            summary: r.summary,
-            recovery: r.recovery,
-            technical_detail: r.technical_detail,
-            data_written: r.data_written,
+            body: r.summary,
         }
     }
 }
