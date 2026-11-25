@@ -23,6 +23,7 @@ use bloom_core::{
 };
 use egui::{CornerRadius, Frame, Id, Rect, Sense};
 use egui_twoui::prelude::*;
+use egui_twoui::tokens::dimens;
 
 use state::{
     load_downloads_history, AppConfig, BloomPage, BrowseStep, DecryptForm, DeviceRightPane,
@@ -552,6 +553,27 @@ impl BloomApp {
     }
 }
 
+fn paint_locked_veil(
+    ctx: &egui::Context,
+    id: Id,
+    rect: Rect,
+    radius: CornerRadius,
+    veil_color: egui::Color32,
+) {
+    if rect.width() <= 1.0 || rect.height() <= 1.0 {
+        return;
+    }
+    egui::Area::new(id)
+        .fixed_pos(rect.min)
+        .movable(false)
+        .constrain(false)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            let (r, _) = ui.allocate_exact_size(rect.size(), Sense::click_and_drag());
+            ui.painter().rect_filled(r, radius, veil_color);
+        });
+}
+
 impl eframe::App for BloomApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, STORAGE_KEY, &self.config);
@@ -667,7 +689,6 @@ impl eframe::App for BloomApp {
                 self.toast
                     .show_message(ui.ctx(), "Cannot close Bloom while flashing", 2.4);
             }
-            self.drawer_open = false;
             self.page_id = BloomPage::Flash.id();
             self.flash_entry_accepted = true;
             self.flash_tab_idx = 0;
@@ -843,14 +864,26 @@ impl eframe::App for BloomApp {
             BloomPage::About.icon(),
         ));
 
+        let before_drawer = ui.available_rect_before_wrap();
         let prev_page_id = self.page_id;
-        if !flash_flashing {
+        if flash_flashing {
+            let mut locked_page_id = BloomPage::Flash.id();
+            let mut locked_drawer_open = self.drawer_open;
+            TwoUiDrawer::new(
+                "bloom_drawer",
+                "Project Bloom",
+                &entries,
+                &mut locked_page_id,
+            )
+            .show(ui, &mut locked_drawer_open, None);
+        } else {
             TwoUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
                 ui,
                 &mut self.drawer_open,
                 None,
             );
         }
+        let after_drawer = ui.available_rect_before_wrap();
 
         if self.page_id == BloomPage::Flash.id()
             && prev_page_id != BloomPage::Flash.id()
@@ -936,11 +969,7 @@ impl eframe::App for BloomApp {
             .show(ui, |ui| {
                 let scaffold_resp = TwoUiScaffold::new("bloom_scaffold", &page_title)
                     .subtitle(page_subtitle.as_deref())
-                    .nav_button(if flash_flashing {
-                        ScaffoldNavButton::None
-                    } else {
-                        ScaffoldNavButton::DrawerMenu
-                    })
+                    .nav_button(ScaffoldNavButton::DrawerMenu)
                     .window_controls(true)
                     .show(
                         ui,
@@ -1193,6 +1222,49 @@ impl eframe::App for BloomApp {
                     self.render_browse_bottom_search_bar(ui);
                 }
             });
+
+        if flash_flashing {
+            let veil_col = theme.palette.round_and_bg.gamma_multiply(0.58);
+            if after_drawer.left() > before_drawer.left() + 4.0 {
+                let drawer_rect = Rect::from_min_max(
+                    before_drawer.min,
+                    egui::pos2(after_drawer.left(), before_drawer.max.y),
+                );
+                paint_locked_veil(
+                    ui.ctx(),
+                    Id::unique("bloom_flash_lock_drawer_panel"),
+                    drawer_rect,
+                    CornerRadius::ZERO,
+                    veil_col,
+                );
+            } else if let Some(pill_rect) = ui
+                .ctx()
+                .memory(|m| m.area_rect(Id::unique(("bloom_drawer", "twoui_compact_pill"))))
+            {
+                paint_locked_veil(
+                    ui.ctx(),
+                    Id::unique("bloom_flash_lock_compact_pill"),
+                    pill_rect,
+                    CornerRadius::same(dimens::CAPSULE_CORNER_RADIUS),
+                    veil_col,
+                );
+            }
+
+            let nav_btn_rect = Rect::from_min_size(
+                egui::pos2(
+                    after_drawer.left() + 14.0,
+                    after_drawer.top() + dimens::TOOLBAR_TOP_INSET,
+                ),
+                egui::vec2(44.0, dimens::TOOLBAR_ROW_HEIGHT),
+            );
+            paint_locked_veil(
+                ui.ctx(),
+                Id::unique("bloom_flash_lock_nav_btn"),
+                nav_btn_rect,
+                CornerRadius::same(dimens::CAPSULE_CORNER_RADIUS),
+                veil_col,
+            );
+        }
 
         // Browse dialogs & custom FirmwareInfo modal
         self.render_firmware_info_modal(ui.ctx());
