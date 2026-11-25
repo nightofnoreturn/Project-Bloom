@@ -22,8 +22,9 @@ use bloom_core::{
     OdinSafetyIssue,
 };
 use egui::{CornerRadius, Frame, Id, Rect, Sense};
+use egui_twoui::feedback::{interaction_factors, interactive_fill, recoil_rect};
 use egui_twoui::prelude::*;
-use egui_twoui::tokens::dimens;
+use egui_twoui::tokens::{colors, dimens, gray};
 
 use state::{
     load_downloads_history, AppConfig, BloomPage, BrowseStep, SharedUiState, SnackAction,
@@ -536,6 +537,169 @@ fn paint_locked_veil(
             let (r, _) = ui.allocate_exact_size(rect.size(), Sense::click_and_drag());
             ui.painter().rect_filled(r, radius, veil_color);
         });
+}
+
+fn show_wipe_flash_countdown_dialog(
+    ctx: &egui::Context,
+    open: &mut bool,
+    opened_at: Instant,
+) -> bool {
+    let slide_id = Id::unique(("bloom_flash_confirm_dialog", "twoui_sug_y"));
+    let alpha_id = Id::unique(("bloom_flash_confirm_dialog", "twoui_sug_a"));
+    if !*open {
+        ctx.animate_bool_with_time(slide_id, false, 0.0);
+        ctx.animate_bool_with_time(alpha_id, false, 0.0);
+        return false;
+    }
+
+    let elapsed = opened_at.elapsed().as_secs();
+    let remaining = 5u64.saturating_sub(elapsed);
+    if remaining > 0 {
+        ctx.request_repaint_after(Duration::from_millis(200));
+    }
+
+    let slide_t = animate_toggle_ctx(ctx, slide_id, true, 0.30, ease_sine_out_80);
+    let alpha_t = animate_toggle_ctx(ctx, alpha_id, true, 0.15, ease_sine_out_80);
+    let theme = theme_from_ctx(ctx);
+    let p = &theme.palette;
+
+    let tier = if alpha_t > 0.3 {
+        ElevationTier::Lg
+    } else {
+        ElevationTier::Zero
+    };
+    let area = egui::Area::new(Id::unique(("bloom_flash_confirm_dialog", "twoui_sug_area")))
+        .anchor(
+            egui::Align2::CENTER_CENTER,
+            egui::vec2(0.0, (1.0 - slide_t) * 14.0),
+        )
+        .order(egui::Order::Foreground);
+
+    let width = 420.0;
+    let mut cancel_clicked = false;
+    let mut confirm_clicked = false;
+
+    let modal_resp = egui::Modal::new(Id::unique("bloom_flash_confirm_dialog"))
+        .area(area)
+        .backdrop_color(p.backdrop.gamma_multiply(alpha_t))
+        .frame(Frame::NONE)
+        .show(ctx, |ui| {
+            show_frosted_frame(
+                ui,
+                CornerRadius::same(dimens::DIALOG_CORNER_RADIUS),
+                colors::SUGGEST_DIALOG_BG.gamma_multiply(alpha_t),
+                egui::Margin::symmetric(20, 20),
+                tier,
+                true,
+                |ui| {
+                    ui.multiply_opacity(alpha_t);
+                    ui.set_width(width);
+                    ui.spacing_mut().item_spacing.y = 12.0;
+
+                    ui.horizontal(|ui| {
+                        TwoUiIcon::ErrorFilled.show(ui, 28.0, colors::RED_DARK);
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("Erase all data and flash?")
+                                .font(font_id_for(ui.ctx(), 18.0, TwoUiFontWeight::SemiBold))
+                                .color(gray::GRAY_01),
+                        );
+                    });
+
+                    ui.label(
+                        egui::RichText::new(
+                            "You selected CSC, which will erase all data on your device. Make sure you have backed up all phone data before continuing. This action cannot be canceled once started. Make sure the binaries are correct and keep the device connected.",
+                        )
+                        .size(14.5)
+                        .color(gray::GRAY_20),
+                    );
+
+                    ui.add_space(6.0);
+                    let gap = 10.0;
+                    let btn_w = ((width - gap) * 0.5).max(80.0);
+                    let btn_r = CornerRadius::same(dimens::CAPSULE_CORNER_RADIUS);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+
+                        let cancel_fill =
+                            egui::Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 0x20);
+                        let (r_cancel, resp_cancel) =
+                            ui.allocate_exact_size(egui::vec2(btn_w, 42.0), Sense::click());
+                        if ui.is_rect_visible(r_cancel) {
+                            let (pt, ht) = interaction_factors(ui, &resp_cancel);
+                            let paint_r = recoil_rect(r_cancel, pt, 1.4);
+                            let final_fill = interactive_fill(cancel_fill, p, ht * 0.7, pt);
+                            ui.painter().rect_filled(paint_r, btn_r, final_fill);
+                            let g = ui.painter().layout_no_wrap(
+                                "Cancel".to_owned(),
+                                font_id_for(ui.ctx(), 15.0, TwoUiFontWeight::Medium),
+                                gray::GRAY_01,
+                            );
+                            ui.painter().galley(
+                                egui::pos2(
+                                    paint_r.center().x - g.size().x * 0.5,
+                                    paint_r.center().y - g.size().y * 0.5,
+                                ),
+                                g,
+                                gray::GRAY_01,
+                            );
+                        }
+                        if resp_cancel.clicked() {
+                            cancel_clicked = true;
+                        }
+
+                        let ready = remaining == 0;
+                        let sense = if ready { Sense::click() } else { Sense::hover() };
+                        let (r_ok, resp_ok) =
+                            ui.allocate_exact_size(egui::vec2(btn_w, 42.0), sense);
+                        if ui.is_rect_visible(r_ok) {
+                            let (paint_r, final_fill, fg, label) = if ready {
+                                let (pt, ht) = interaction_factors(ui, &resp_ok);
+                                let pr = recoil_rect(r_ok, pt, 1.4);
+                                let fill = interactive_fill(colors::RED_LIGHT, p, ht * 0.7, pt);
+                                (pr, fill, gray::WHITE, "OK".to_owned())
+                            } else {
+                                let muted_fill =
+                                    egui::Color32::from_rgba_unmultiplied(0xFF, 0xFF, 0xFF, 0x10);
+                                (r_ok, muted_fill, gray::GRAY_40, remaining.to_string())
+                            };
+                            ui.painter().rect_filled(paint_r, btn_r, final_fill);
+                            let g = ui.painter().layout_no_wrap(
+                                label,
+                                font_id_for(ui.ctx(), 15.0, TwoUiFontWeight::Medium),
+                                fg,
+                            );
+                            ui.painter().galley(
+                                egui::pos2(
+                                    paint_r.center().x - g.size().x * 0.5,
+                                    paint_r.center().y - g.size().y * 0.5,
+                                ),
+                                g,
+                                fg,
+                            );
+                        }
+                        if ready && resp_ok.clicked() {
+                            confirm_clicked = true;
+                        }
+                    });
+                },
+            );
+        });
+
+    if cancel_clicked
+        || confirm_clicked
+        || modal_resp.backdrop_response.clicked()
+        || ctx.input(|i| i.key_pressed(egui::Key::Escape))
+    {
+        *open = false;
+    }
+
+    if !*open {
+        ctx.animate_bool_with_time(slide_id, false, 0.0);
+        ctx.animate_bool_with_time(alpha_id, false, 0.0);
+    }
+
+    confirm_clicked
 }
 
 impl eframe::App for BloomApp {
@@ -1329,41 +1493,18 @@ impl eframe::App for BloomApp {
         // 5. Pre-flash suggestive confirmation (immediate for HOME_CSC, 5s Xiaomi countdown for wipe CSC)
         if self.flash_confirm_dialog_open {
             if self.flash_confirm_is_wipe {
-                let elapsed = self.flash_confirm_opened_at.elapsed().as_secs();
-                let remaining = 5u64.saturating_sub(elapsed);
-                if remaining > 0 {
-                    ui.ctx().request_repaint_after(Duration::from_millis(200));
-                }
-                let countdown_lbl = remaining.to_string();
-                let confirm_act = if remaining > 0 {
-                    DialogAction::cancel(&countdown_lbl)
-                } else {
-                    DialogAction::primary("OK")
-                };
-                if let Some(idx) = TwoUiSuggestiveDialog::new(
-                    "bloom_flash_confirm_dialog",
-                    "Erase all data and flash?",
-                    "You selected CSC, which will erase all data on your device. Make sure you have backed up all phone data before continuing. This action cannot be canceled once started. Make sure the binaries are correct and keep the device connected.",
-                )
-                .icon(TwoUiIcon::ErrorFilled)
-                .width(420.0)
-                .action(DialogAction::cancel("Cancel"))
-                .action(confirm_act)
-                .show(ui.ctx(), &mut self.flash_confirm_dialog_open)
-                {
-                    if idx == 1 {
-                        if remaining > 0 {
-                            self.flash_confirm_dialog_open = true;
-                        } else {
-                            spawn_odin_flash(
-                                &self.rt,
-                                Arc::clone(&self.shared),
-                                ui.ctx().clone(),
-                                self.flash_slots.clone(),
-                                self.flash_options,
-                            );
-                        }
-                    }
+                if show_wipe_flash_countdown_dialog(
+                    ui.ctx(),
+                    &mut self.flash_confirm_dialog_open,
+                    self.flash_confirm_opened_at,
+                ) {
+                    spawn_odin_flash(
+                        &self.rt,
+                        Arc::clone(&self.shared),
+                        ui.ctx().clone(),
+                        self.flash_slots.clone(),
+                        self.flash_options,
+                    );
                 }
             } else if let Some(idx) = TwoUiSuggestiveDialog::new(
                 "bloom_flash_confirm_dialog",
