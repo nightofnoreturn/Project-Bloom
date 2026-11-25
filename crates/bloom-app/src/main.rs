@@ -661,6 +661,22 @@ impl eframe::App for BloomApp {
         let flash_flashing = snap.flash_flashing;
         let flash_device_info = snap.flash_device_info;
 
+        if flash_flashing {
+            if ui.ctx().input(|i| i.viewport().close_requested()) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.toast
+                    .show_message(ui.ctx(), "Cannot close Bloom while flashing", 2.4);
+            }
+            self.drawer_open = false;
+            self.page_id = BloomPage::Flash.id();
+            self.flash_entry_accepted = true;
+            self.flash_tab_idx = 0;
+            self.flash_help_dialog_open = false;
+            self.flash_reset_confirm_open = false;
+            self.flash_reboot_dl_confirm_open = false;
+            self.flash_csc_choice_dialog_open = false;
+        }
+
         for (slot, path, res) in snap.pending_md5 {
             match res {
                 Ok(()) => {
@@ -729,13 +745,17 @@ impl eframe::App for BloomApp {
         }
 
         // Notify user via SuggestiveSnackBar when a Samsung device newly connects or enables ADB / Download mode.
-        let newly_notifiable = connected_devices.iter().find(|d| {
-            let key = d.stable_identity_key();
-            match self.known_connected_states.get(&key) {
-                None => true,
-                Some(&was_openable) => !was_openable && d.can_open_device_page(),
-            }
-        });
+        let newly_notifiable = if flash_flashing {
+            None
+        } else {
+            connected_devices.iter().find(|d| {
+                let key = d.stable_identity_key();
+                match self.known_connected_states.get(&key) {
+                    None => true,
+                    Some(&was_openable) => !was_openable && d.can_open_device_page(),
+                }
+            })
+        };
         if let Some(dev) = newly_notifiable {
             self.show_snackbar_with_action(
                 ui.ctx(),
@@ -824,11 +844,13 @@ impl eframe::App for BloomApp {
         ));
 
         let prev_page_id = self.page_id;
-        TwoUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
-            ui,
-            &mut self.drawer_open,
-            None,
-        );
+        if !flash_flashing {
+            TwoUiDrawer::new("bloom_drawer", "Project Bloom", &entries, &mut self.page_id).show(
+                ui,
+                &mut self.drawer_open,
+                None,
+            );
+        }
 
         if self.page_id == BloomPage::Flash.id()
             && prev_page_id != BloomPage::Flash.id()
@@ -914,7 +936,11 @@ impl eframe::App for BloomApp {
             .show(ui, |ui| {
                 let scaffold_resp = TwoUiScaffold::new("bloom_scaffold", &page_title)
                     .subtitle(page_subtitle.as_deref())
-                    .nav_button(ScaffoldNavButton::DrawerMenu)
+                    .nav_button(if flash_flashing {
+                        ScaffoldNavButton::None
+                    } else {
+                        ScaffoldNavButton::DrawerMenu
+                    })
                     .window_controls(true)
                     .show(
                         ui,
@@ -934,7 +960,8 @@ impl eframe::App for BloomApp {
                             }
                             if is_flash_page
                                 && toolbar_ui
-                                    .add(
+                                    .add_enabled(
+                                        !flash_flashing,
                                         TwoUiIconButton::new(TwoUiIcon::HelpOutline)
                                             .size(34.0)
                                             .icon_size(16.0)
@@ -964,7 +991,7 @@ impl eframe::App for BloomApp {
                         },
                     );
 
-                if scaffold_resp.nav_clicked {
+                if scaffold_resp.nav_clicked && !flash_flashing {
                     self.drawer_open = !self.drawer_open;
                 }
                 if toggle_dl_search {
@@ -973,7 +1000,7 @@ impl eframe::App for BloomApp {
                         self.downloads_search_query.clear();
                     }
                 }
-                if open_flash_help {
+                if open_flash_help && !flash_flashing {
                     self.flash_help_dialog_open = true;
                 }
 
@@ -1024,17 +1051,19 @@ impl eframe::App for BloomApp {
                         |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.allocate_ui(egui::vec2(220.0, 64.0), |ui| {
-                                    let items = [
-                                        BottomNavItem::new("Flash")
-                                            .icon(TwoUiIcon::LightningOutline),
-                                        BottomNavItem::new("Options")
-                                            .icon(TwoUiIcon::SettingsOutline),
-                                    ];
-                                    MainTabBar::new("bloom_flash_main_tabs", &items, &mut tab_draft)
-                                        .show(ui);
+                                ui.add_enabled_ui(!flash_flashing, |ui| {
+                                    ui.allocate_ui(egui::vec2(220.0, 64.0), |ui| {
+                                        let items = [
+                                            BottomNavItem::new("Flash")
+                                                .icon(TwoUiIcon::LightningOutline),
+                                            BottomNavItem::new("Options")
+                                                .icon(TwoUiIcon::SettingsOutline),
+                                        ];
+                                        MainTabBar::new("bloom_flash_main_tabs", &items, &mut tab_draft)
+                                            .show(ui);
+                                    });
                                 });
-                                if !self.flash_options_unlocked && tab_draft == 1 {
+                                if !flash_flashing && !self.flash_options_unlocked && tab_draft == 1 {
                                     options_tapped = true;
                                 }
 
@@ -1556,16 +1585,18 @@ impl eframe::App for BloomApp {
                     self.toast.show_message(ui.ctx(), "Restored", 1.8);
                 }
                 SnackAction::ShowConnectedDevice(target_key) => {
-                    if let Some((idx, dev)) = connected_devices.iter().enumerate().find(|(_, d)| {
-                        d.stable_identity_key() == target_key || d.device_id == target_key
-                    }) {
-                        if dev.can_open_device_page() {
-                            self.page_id = CONNECTED_DEVICE_PAGE_BASE + idx;
-                        } else {
-                            self.non_adb_dialog_device = Some(dev.clone());
-                            self.non_adb_dialog_open = true;
+                    if !flash_flashing {
+                        if let Some((idx, dev)) = connected_devices.iter().enumerate().find(|(_, d)| {
+                            d.stable_identity_key() == target_key || d.device_id == target_key
+                        }) {
+                            if dev.can_open_device_page() {
+                                self.page_id = CONNECTED_DEVICE_PAGE_BASE + idx;
+                            } else {
+                                self.non_adb_dialog_device = Some(dev.clone());
+                                self.non_adb_dialog_open = true;
+                            }
+                            ui.ctx().request_repaint();
                         }
-                        ui.ctx().request_repaint();
                     }
                 }
             }

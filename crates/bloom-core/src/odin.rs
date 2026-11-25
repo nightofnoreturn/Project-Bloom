@@ -1157,6 +1157,111 @@ fn flash_has_started_writing() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "windows")]
+mod wake_lock_sys {
+    use std::sync::mpsc;
+    use std::thread::JoinHandle;
+
+    const ES_CONTINUOUS: u32 = 0x8000_0000;
+    const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+    const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetThreadExecutionState(es_flags: u32) -> u32;
+    }
+
+    pub(super) struct SystemWakeLock {
+        stop_tx: Option<mpsc::Sender<()>>,
+        join: Option<JoinHandle<()>>,
+    }
+
+    impl SystemWakeLock {
+        pub(super) fn acquire() -> Self {
+            let (stop_tx, stop_rx) = mpsc::channel();
+            // Dedicated thread keeps Win32 per-thread execution state intact across async .await hops.
+            let join = std::thread::Builder::new()
+                .name("bloom-wakelock".to_owned())
+                .spawn(move || {
+                    unsafe {
+                        let _ = SetThreadExecutionState(
+                            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED,
+                        );
+                    }
+                    let _ = stop_rx.recv();
+                    unsafe {
+                        let _ = SetThreadExecutionState(ES_CONTINUOUS);
+                    }
+                })
+                .ok();
+            Self {
+                stop_tx: Some(stop_tx),
+                join,
+            }
+        }
+    }
+
+    impl Drop for SystemWakeLock {
+        fn drop(&mut self) {
+            drop(self.stop_tx.take());
+            if let Some(handle) = self.join.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod wake_lock_sys {
+    use std::process::{Child, Command, Stdio};
+
+    pub(super) struct SystemWakeLock {
+        child: Option<Child>,
+    }
+
+    impl SystemWakeLock {
+        pub(super) fn acquire() -> Self {
+            let child = Command::new("systemd-inhibit")
+                .args([
+                    "--what=idle:sleep",
+                    "--who=Project Bloom",
+                    "--why=Flashing Samsung firmware",
+                    "--mode=block",
+                    "cat",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok();
+            Self { child }
+        }
+    }
+
+    impl Drop for SystemWakeLock {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                drop(child.stdin.take());
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+mod wake_lock_sys {
+    pub(super) struct SystemWakeLock;
+
+    impl SystemWakeLock {
+        pub(super) fn acquire() -> Self {
+            Self
+        }
+    }
+}
+
+use wake_lock_sys::SystemWakeLock;
+
 /// Runs a strictly safe official Odin firmware flash workflow with MD5 verification and `DVIF`
 /// preflight blocking model mismatch and binary downgrades (or read-only DeviceInfo inspection).
 pub async fn execute_safe_flash<F>(
@@ -1183,6 +1288,8 @@ where
     if options.device_info_only {
         return Box::pin(execute_device_info_only()).await;
     }
+
+    let _wake_lock = SystemWakeLock::acquire();
 
     let packages = slots.selected_packages();
     if packages.is_empty() {
@@ -1493,5 +1600,14 @@ mod tests {
         let busy = classify_transport_error(&TransportError::InterfaceClaimFailed, false);
         assert_eq!(busy.category, OdinErrorCategory::UsbBusyOrDriver);
         assert!(!busy.data_written);
+    }
+
+    #[test]
+    fn system_wake_lock_acquires_and_drops_cleanly() {
+        fn assert_send<T: Send>() {}
+        assert_send::<SystemWakeLock>();
+
+        let lock = SystemWakeLock::acquire();
+        drop(lock);
     }
 }

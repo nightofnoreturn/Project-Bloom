@@ -655,53 +655,60 @@ impl BloomApp {
             self.mock_window_open = false;
         }
 
-        match load_request {
-            DummyLoadRequest::None => {}
-            DummyLoadRequest::LoadFolder(folder) => {
-                self.flash_entry_accepted = true;
-                self.page_id = BloomPage::Flash.id();
-                match OdinFirmwareSlots::scan_firmware_folder(&folder) {
-                    Ok(scanned) => {
-                        if scanned.can_toggle_csc_mode() {
-                            self.flash_pending_folder_slots = Some(scanned);
-                            self.flash_csc_choice_dialog_open = true;
-                        } else {
-                            self.apply_scanned_flash_slots(ctx, scanned);
+        if is_flashing_in_bloom {
+            if !matches!(load_request, DummyLoadRequest::None) {
+                self.toast
+                    .show_message(ctx, "Cannot load firmware while flashing", 2.4);
+            }
+        } else {
+            match load_request {
+                DummyLoadRequest::None => {}
+                DummyLoadRequest::LoadFolder(folder) => {
+                    self.flash_entry_accepted = true;
+                    self.page_id = BloomPage::Flash.id();
+                    match OdinFirmwareSlots::scan_firmware_folder(&folder) {
+                        Ok(scanned) => {
+                            if scanned.can_toggle_csc_mode() {
+                                self.flash_pending_folder_slots = Some(scanned);
+                                self.flash_csc_choice_dialog_open = true;
+                            } else {
+                                self.apply_scanned_flash_slots(ctx, scanned);
+                            }
+                        }
+                        Err(err) => {
+                            self.toast.show_message(ctx, format!("{err}"), 2.4);
                         }
                     }
-                    Err(err) => {
-                        self.toast.show_message(ctx, format!("{err}"), 2.4);
-                    }
+                    ctx.request_repaint();
                 }
-                ctx.request_repaint();
-            }
-            DummyLoadRequest::LoadSingle {
-                slot,
-                file,
-                verify_md5,
-            } => {
-                self.flash_entry_accepted = true;
-                self.page_id = BloomPage::Flash.id();
-                self.flash_slots = OdinFirmwareSlots::default();
-                if verify_md5 {
-                    spawn_verify_odin_slot_md5(
-                        &self.rt,
-                        Arc::clone(&self.shared),
-                        ctx.clone(),
-                        slot,
-                        file,
-                    );
-                } else {
-                    self.flash_slots.set_slot(slot, Some(file.clone()));
-                    if let Ok(mut g) = self.shared.lock() {
-                        let fname = file
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("package");
-                        g.flash.logs.push(format!("Added {}: {fname}", slot.label()));
+                DummyLoadRequest::LoadSingle {
+                    slot,
+                    file,
+                    verify_md5,
+                } => {
+                    self.flash_entry_accepted = true;
+                    self.page_id = BloomPage::Flash.id();
+                    self.flash_slots = OdinFirmwareSlots::default();
+                    if verify_md5 {
+                        spawn_verify_odin_slot_md5(
+                            &self.rt,
+                            Arc::clone(&self.shared),
+                            ctx.clone(),
+                            slot,
+                            file,
+                        );
+                    } else {
+                        self.flash_slots.set_slot(slot, Some(file.clone()));
+                        if let Ok(mut g) = self.shared.lock() {
+                            let fname = file
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("package");
+                            g.flash.logs.push(format!("Added {}: {fname}", slot.label()));
+                        }
                     }
+                    ctx.request_repaint();
                 }
-                ctx.request_repaint();
             }
         }
     }
