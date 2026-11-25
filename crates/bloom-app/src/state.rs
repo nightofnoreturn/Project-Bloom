@@ -24,7 +24,6 @@ pub const ACCENT_PRESETS: [(&str, Color32); 5] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BloomPage {
     Browse,
-    Decrypt,
     Settings,
     About,
     PairDevice,
@@ -35,7 +34,6 @@ pub enum BloomPage {
 impl BloomPage {
     pub fn from_id(id: usize) -> Self {
         match id {
-            1 => Self::Decrypt,
             2 => Self::Settings,
             3 => Self::About,
             4 => Self::PairDevice,
@@ -48,7 +46,6 @@ impl BloomPage {
     pub fn id(self) -> usize {
         match self {
             Self::Browse => 0,
-            Self::Decrypt => 1,
             Self::Settings => 2,
             Self::About => 3,
             Self::PairDevice => 4,
@@ -61,7 +58,6 @@ impl BloomPage {
     pub fn title(self) -> &'static str {
         match self {
             Self::Browse => "Browse",
-            Self::Decrypt => "Decrypt",
             Self::Settings => "Settings",
             Self::About => "About",
             Self::PairDevice => "Pair Device",
@@ -73,7 +69,6 @@ impl BloomPage {
     pub fn icon(self) -> TwoUiIcon {
         match self {
             Self::Browse => TwoUiIcon::Search,
-            Self::Decrypt => TwoUiIcon::SecurityOutline,
             Self::Settings => TwoUiIcon::SettingsOutline,
             Self::About => TwoUiIcon::InfoOutline,
             Self::PairDevice => TwoUiIcon::QrCode,
@@ -157,7 +152,6 @@ pub fn default_output_dir() -> String {
 
 #[derive(Debug, Clone)]
 pub enum SnackAction {
-    OpenFolder(PathBuf),
     RestoreConfig(Box<AppConfig>),
     ShowConnectedDevice(String),
 }
@@ -200,19 +194,13 @@ pub enum BrowseStep {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DeviceRightPane {
-    #[default]
-    Info,
-    RegionPicker,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct DeviceUpdateState {
     pub loading: bool,
     pub checked: bool,
     pub update_available: bool,
     pub latest_build: Option<String>,
+    pub latest_item: Option<HistoryItem>,
     pub region_used: Option<String>,
     pub history: Option<HistoryResult>,
     pub error: Option<String>,
@@ -352,7 +340,6 @@ impl FlashUiState {
 
 #[derive(Debug, Default)]
 pub struct SharedUiState {
-    pub decrypting: bool,
     pub usb_scanning: bool,
     pub connected_devices: Vec<ConnectedSamsungDevice>,
     pub device_renders: HashMap<String, DeviceRenderState>,
@@ -366,8 +353,6 @@ pub struct SharedUiState {
     pub my_device_builds_loading: bool,
     pub my_device_builds_error: Option<String>,
     pub my_device_builds: Option<HistoryResult>,
-    pub decrypt_progress: Option<(u64, u64, u64)>,
-    pub last_decrypted_path: Option<PathBuf>,
     pub next_download_id: u64,
     pub active_downloads: Vec<ActiveDownloadJob>,
     pub completed_downloads: Vec<DownloadJobRecord>,
@@ -375,30 +360,13 @@ pub struct SharedUiState {
     #[allow(dead_code)]
     pub last_completed_output: Option<PathBuf>,
     pub flash: FlashUiState,
-    pub error_message: Option<String>,
     pub pending_toast: Option<String>,
-    pub pending_snack: Option<(String, Option<&'static str>, SnackAction)>,
 }
 
 impl SharedUiState {
     pub fn is_busy(&self) -> bool {
-        self.decrypting
-            || self.my_device_builds_loading
-            || self.flash.flashing
-            || self.flash.is_verifying_md5()
+        self.my_device_builds_loading || self.flash.flashing || self.flash.is_verifying_md5()
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct DecryptForm {
-    pub input_path: String,
-    pub output_path: String,
-    pub use_manual_key: bool,
-    pub manual_key: String,
-    pub model: String,
-    pub csc: String,
-    pub fw: String,
-    pub imei: String,
 }
 
 /// Normalizes Samsung's OS strings (`"15"`, `"Android 16(Baklava)"`, `"U(Android 14)"`)
@@ -503,18 +471,6 @@ pub fn format_sync_age(synced_at_unix: u64) -> String {
     }
 }
 
-pub fn derive_decrypted_output(input: &str) -> String {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if trimmed.ends_with(".enc4") || trimmed.ends_with(".enc2") {
-        trimmed.replace(".enc4", "").replace(".enc2", "")
-    } else {
-        format!("{trimmed}.zip")
-    }
-}
-
 pub fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -528,23 +484,6 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KiB", b / KIB)
     } else {
         format!("{bytes} B")
-    }
-}
-
-pub fn format_eta(remaining_bytes: u64, bps: u64) -> String {
-    if bps == 0 {
-        return "--".to_owned();
-    }
-    let secs = remaining_bytes / bps;
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    if h > 0 {
-        format!("{h}h {m:02}m {s:02}s")
-    } else if m > 0 {
-        format!("{m}m {s:02}s")
-    } else {
-        format!("{s}s")
     }
 }
 

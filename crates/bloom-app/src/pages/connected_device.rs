@@ -11,7 +11,7 @@ use egui_twoui::tokens::dimens;
 
 use crate::state::{
     extract_android_number, short_build_tail, BloomPage, BrowseStep, DeviceRenderState,
-    DeviceRightPane, DeviceUpdateState,
+    DeviceUpdateState,
 };
 use crate::tasks::{spawn_check_device_update, spawn_fetch_device_render};
 use crate::BloomApp;
@@ -230,8 +230,6 @@ impl BloomApp {
     pub fn render_connected_device_page(&mut self, ui: &mut Ui, dev: &ConnectedSamsungDevice) {
         if self.last_connected_device_id.as_deref() != Some(dev.device_id.as_str()) {
             self.last_connected_device_id = Some(dev.device_id.clone());
-            self.device_right_pane = DeviceRightPane::Info;
-            self.device_region_query.clear();
             self.whats_new_dialog_open = false;
         }
 
@@ -281,7 +279,6 @@ impl BloomApp {
                     self.render_connected_right_pane(
                         ui,
                         dev,
-                        catalog_dev.as_ref(),
                         decoded.as_ref(),
                         &update_state,
                     );
@@ -293,7 +290,6 @@ impl BloomApp {
             self.render_connected_right_pane(
                 ui,
                 dev,
-                catalog_dev.as_ref(),
                 decoded.as_ref(),
                 &update_state,
             );
@@ -523,14 +519,14 @@ impl BloomApp {
         let show_update_now =
             update_state.checked && update_state.update_available && !update_state.loading;
 
-        let mut open_region_picker = false;
+        let mut open_update_now = false;
         let mut run_check_update = false;
         let mut open_version_history = false;
 
         ui.vertical_centered(|ui| {
             if show_update_now {
                 if ui.add(TwoUiButton::contained_primary("Update now")).clicked() {
-                    open_region_picker = true;
+                    open_update_now = true;
                 }
             } else if ui
                 .add(TwoUiButton::contained_primary("Check Update").loading(update_state.loading))
@@ -546,9 +542,33 @@ impl BloomApp {
             }
         });
 
-        if open_region_picker {
-            self.device_right_pane = DeviceRightPane::RegionPicker;
-            self.device_region_query.clear();
+        if open_update_now {
+            let latest_item = update_state.latest_item.clone().or_else(|| {
+                update_state
+                    .history
+                    .as_ref()
+                    .and_then(|h| h.items.first().cloned())
+            });
+            if let Some(item) = latest_item {
+                let model_code = dev.model.trim().to_ascii_uppercase();
+                let region_code = update_state
+                    .region_used
+                    .clone()
+                    .filter(|r| !r.trim().is_empty())
+                    .unwrap_or_else(|| self.effective_device_csc(dev));
+                let device_imei = if !self.config.imei.trim().is_empty() {
+                    Some(self.config.imei.trim().to_owned())
+                } else {
+                    dev.serial
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                };
+                self.open_firmware_info_for(item, model_code, region_code, device_imei, ui.ctx());
+            } else {
+                run_check_update = true;
+            }
         }
         if run_check_update {
             let target_region = self.effective_device_csc(dev);
@@ -571,8 +591,6 @@ impl BloomApp {
             self.selected_my_region = Some(region.clone());
             self.config.model = target.model.clone();
             self.config.csc = region.code.clone();
-            self.device_right_pane = DeviceRightPane::Info;
-            self.device_region_query.clear();
             if matches!(self.browse_step, BrowseStep::RegionPicker { .. }) {
                 self.browse_step = BrowseStep::Categories;
             }
@@ -585,18 +603,10 @@ impl BloomApp {
         &mut self,
         ui: &mut Ui,
         dev: &ConnectedSamsungDevice,
-        catalog_dev: Option<&GalaxyDevice>,
         decoded: Option<&DecodedBuildCode>,
         update_state: &DeviceUpdateState,
     ) {
-        match self.device_right_pane {
-            DeviceRightPane::Info => {
-                self.render_device_info_subpane(ui, dev, decoded, update_state);
-            }
-            DeviceRightPane::RegionPicker => {
-                self.render_device_region_picker_subpane(ui, dev, catalog_dev);
-            }
-        }
+        self.render_device_info_subpane(ui, dev, decoded, update_state);
     }
 
     fn render_device_info_subpane(
@@ -1138,108 +1148,5 @@ impl BloomApp {
             .width(420.0)
             .action(DialogAction::primary("OK"))
             .show(ctx, &mut self.whats_new_dialog_open);
-    }
-
-    fn render_device_region_picker_subpane(
-        &mut self,
-        ui: &mut Ui,
-        dev: &ConnectedSamsungDevice,
-        catalog_dev: Option<&GalaxyDevice>,
-    ) {
-        let theme = theme_from_ui(ui);
-        let p = &theme.palette;
-
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            if ui
-                .add(TwoUiIconButton::new(TwoUiIcon::Back).tooltip("Back"))
-                .clicked()
-            {
-                self.device_right_pane = DeviceRightPane::Info;
-            }
-            ui.label(
-                RichText::new("Region")
-                    .font(font_id(ui, 18.0, TwoUiFontWeight::SemiBold))
-                    .color(p.text_primary),
-            );
-        });
-
-        ui.add_space(10.0);
-        let _ = TwoUiSearchBar::new(&mut self.device_region_query)
-            .hint("Search")
-            .show(ui);
-        ui.add_space(10.0);
-
-        let device_csc_item = dev
-            .csc
-            .as_deref()
-            .and_then(|code| self.csc_db.find_exact(code))
-            .cloned();
-        let ordered: Vec<CscItem> = self
-            .csc_db
-            .search(&self.device_region_query)
-            .into_iter()
-            .cloned()
-            .collect();
-
-        let mut chosen_region: Option<CscItem> = None;
-
-        if let Some(ref active_csc) = device_csc_item {
-            if ordered.iter().any(|item| item.code == active_csc.code) {
-                CardSection::new()
-                    .inner_margin(Margin::symmetric(0, 4))
-                    .show(ui, |ui| {
-                        let mut row = CardItem::new(active_csc.region_label()).badge("Device");
-                        if let Some(carriers) = active_csc.carrier_summary() {
-                            row = row.summary(carriers);
-                        }
-                        if ui.add(row).clicked() {
-                            chosen_region = Some(active_csc.clone());
-                        }
-                    });
-                ui.add_space(10.0);
-            }
-        }
-
-        if ordered.is_empty() {
-            CardSection::new()
-                .inner_margin(Margin::symmetric(20, 16))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("No results")
-                            .font(font_id(ui, 14.0, TwoUiFontWeight::Medium))
-                            .color(p.text_muted),
-                    );
-                });
-        } else {
-            CardSection::new()
-                .inner_margin(Margin::symmetric(0, 4))
-                .show(ui, |ui| {
-                    for (idx, item) in ordered.iter().enumerate() {
-                        let mut row = CardItem::new(item.region_label()).top_divider(idx > 0);
-                        if let Some(carriers) = item.carrier_summary() {
-                            row = row.summary(carriers);
-                        }
-                        if ui.add(row).clicked() {
-                            chosen_region = Some(item.clone());
-                        }
-                    }
-                });
-        }
-
-        if let Some(region) = chosen_region {
-            let target = target_galaxy_device(dev, catalog_dev);
-            self.selected_my_device = Some(target.clone());
-            self.selected_my_region = Some(region.clone());
-            self.config.model = target.model.clone();
-            self.config.csc = region.code.clone();
-            self.device_right_pane = DeviceRightPane::Info;
-            self.device_region_query.clear();
-            if matches!(self.browse_step, BrowseStep::RegionPicker { .. }) {
-                self.browse_step = BrowseStep::Categories;
-            }
-            self.page_id = BloomPage::Browse.id();
-            self.fetch_builds_for_selection(&target, &region, ui.ctx());
-        }
     }
 }

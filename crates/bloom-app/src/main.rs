@@ -26,12 +26,12 @@ use egui_twoui::prelude::*;
 use egui_twoui::tokens::dimens;
 
 use state::{
-    load_downloads_history, AppConfig, BloomPage, BrowseStep, DecryptForm, DeviceRightPane,
-    SharedUiState, SnackAction, CONNECTED_DEVICE_PAGE_BASE, STORAGE_KEY,
+    load_downloads_history, AppConfig, BloomPage, BrowseStep, SharedUiState, SnackAction,
+    CONNECTED_DEVICE_PAGE_BASE, STORAGE_KEY,
 };
 use tasks::{
-    spawn_manual_decrypt, spawn_odin_flash, spawn_probe_odin_device,
-    spawn_reboot_to_download_mode, spawn_scan_adb_devices, spawn_sync_galaxy_db,
+    spawn_odin_flash, spawn_probe_odin_device, spawn_reboot_to_download_mode,
+    spawn_scan_adb_devices, spawn_sync_galaxy_db,
 };
 
 static FATAL_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -175,7 +175,6 @@ pub struct BloomApp {
     pub imei_db: Arc<ImeiDb>,
     pub csc_db: CscDb,
     pub config: AppConfig,
-    pub decrypt_form: DecryptForm,
     pub last_usb_scan: Instant,
     pub gl_available: bool,
     pub device_render_textures: HashMap<String, egui::TextureHandle>,
@@ -197,14 +196,15 @@ pub struct BloomApp {
     pub default_region_dont_ask_draft: bool,
     pub selected_grid_build: Option<HistoryItem>,
     pub firmware_info_open: bool,
+    pub firmware_info_model: String,
+    pub firmware_info_region: String,
+    pub firmware_info_imei: Option<String>,
     pub lower_binary_dialog_open: bool,
     pub lower_binary_dialog_device_name: String,
     pub lower_binary_dialog_target_build: Option<HistoryItem>,
     pub lower_binary_ack_draft: bool,
 
     // Connected device split-pane state
-    pub device_right_pane: DeviceRightPane,
-    pub device_region_query: String,
     pub last_connected_device_id: Option<String>,
     pub known_connected_states: HashMap<String, bool>,
     pub non_adb_dialog_open: bool,
@@ -223,7 +223,6 @@ pub struct BloomApp {
     pub last_mdns_scan: Instant,
 
     // Other pages state
-    pub edit_decrypt_paths_inline: bool,
     pub licenses_sheet_open: bool,
     pub settings_region_dialog_open: bool,
     pub settings_region_query: String,
@@ -335,13 +334,6 @@ impl BloomApp {
         }
         spawn_scan_adb_devices(&rt, Arc::clone(&shared), cc.egui_ctx.clone());
 
-        let decrypt_form = DecryptForm {
-            model: config.model.clone(),
-            csc: config.csc.clone(),
-            imei: config.imei.clone(),
-            ..Default::default()
-        };
-
         let color_draft = config.accent_color();
         let (pair_qr_service, pair_qr_password, pair_qr_payload) = generate_adb_qr_session();
         let initial_mdns_scan = Instant::now()
@@ -357,7 +349,6 @@ impl BloomApp {
             imei_db: Arc::new(ImeiDb::load_embedded()),
             csc_db: CscDb::load_embedded(),
             config,
-            decrypt_form,
             last_usb_scan: Instant::now(),
             gl_available,
             device_render_textures: HashMap::new(),
@@ -378,13 +369,14 @@ impl BloomApp {
             default_region_dont_ask_draft: false,
             selected_grid_build: None,
             firmware_info_open: false,
+            firmware_info_model: String::new(),
+            firmware_info_region: String::new(),
+            firmware_info_imei: None,
             lower_binary_dialog_open: false,
             lower_binary_dialog_device_name: String::new(),
             lower_binary_dialog_target_build: None,
             lower_binary_ack_draft: false,
 
-            device_right_pane: DeviceRightPane::Info,
-            device_region_query: String::new(),
             last_connected_device_id: None,
             known_connected_states: HashMap::new(),
             non_adb_dialog_open: false,
@@ -401,7 +393,6 @@ impl BloomApp {
             pair_otp_code: String::new(),
             last_mdns_scan: initial_mdns_scan,
 
-            edit_decrypt_paths_inline: false,
             licenses_sheet_open: false,
             settings_region_dialog_open: false,
             settings_region_query: String::new(),
@@ -485,33 +476,6 @@ impl BloomApp {
         }
     }
 
-    pub fn trigger_decrypt(&self, ctx: &egui::Context) {
-        spawn_manual_decrypt(
-            &self.rt,
-            Arc::clone(&self.shared),
-            Arc::clone(&self.imei_db),
-            ctx.clone(),
-            self.decrypt_form.clone(),
-            self.config.allow_mismatch,
-        );
-    }
-
-    #[allow(dead_code)]
-    pub fn load_build_into_decrypt(
-        &mut self,
-        model: String,
-        region: String,
-        fw: String,
-        ctx: &egui::Context,
-    ) {
-        self.decrypt_form.model = model;
-        self.decrypt_form.csc = region;
-        self.decrypt_form.fw = fw;
-        self.decrypt_form.use_manual_key = false;
-        self.page_id = BloomPage::Decrypt.id();
-        self.toast.show_message(ctx, "Loaded", 1.8);
-    }
-
     fn show_snackbar_with_action(
         &mut self,
         ctx: &egui::Context,
@@ -580,16 +544,10 @@ impl eframe::App for BloomApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let pending_snack = if let Ok(mut g) = self.shared.lock() {
+        if let Ok(mut g) = self.shared.lock() {
             if let Some(msg) = g.pending_toast.take() {
                 self.toast.show_message(ui.ctx(), msg, 2.4);
             }
-            g.pending_snack.take()
-        } else {
-            None
-        };
-        if let Some((msg, label, action)) = pending_snack {
-            self.show_snackbar_with_action(ui.ctx(), msg, label, action);
         }
 
         if self.config.follow_system {
@@ -847,11 +805,6 @@ impl eframe::App for BloomApp {
             BloomPage::Flash.title(),
             BloomPage::Flash.icon(),
         ));
-        entries.push(DrawerEntry::item(
-            BloomPage::Decrypt.id(),
-            BloomPage::Decrypt.title(),
-            BloomPage::Decrypt.icon(),
-        ));
         entries.push(DrawerEntry::DottedDivider);
         entries.push(DrawerEntry::item(
             BloomPage::Settings.id(),
@@ -947,14 +900,13 @@ impl eframe::App for BloomApp {
             spawn_probe_odin_device(&self.rt, Arc::clone(&self.shared), ui.ctx().clone());
         }
         let is_downloads_page = active_connected_idx.is_none() && current_page == BloomPage::Downloads;
-        let is_decrypt_page = active_connected_idx.is_none() && current_page == BloomPage::Decrypt;
         let is_browse_page = active_connected_idx.is_none() && current_page == BloomPage::Browse;
         let show_browse_bottom_search = is_browse_page
             && (matches!(self.browse_step, BrowseStep::RegionPicker { .. })
                 || self.selected_my_device.is_none()
                 || self.selected_my_region.is_none());
         self.snackbar.set_bottom_offset(
-            if is_decrypt_page || is_flash_page || show_browse_bottom_search {
+            if is_flash_page || show_browse_bottom_search {
                 88.0
             } else {
                 24.0
@@ -1008,7 +960,6 @@ impl eframe::App for BloomApp {
                             } else {
                                 match current_page {
                                     BloomPage::Browse => self.render_browse_page(ui),
-                                    BloomPage::Decrypt => self.render_decrypt_page(ui),
                                     BloomPage::Settings => self.render_settings_page(ui),
                                     BloomPage::About => self.render_about_page(ui),
                                     BloomPage::PairDevice => self.render_pair_device_page(ui),
@@ -1033,33 +984,6 @@ impl eframe::App for BloomApp {
                     self.flash_help_dialog_open = true;
                 }
 
-                if is_decrypt_page {
-                    let mut dec_action: Option<usize> = None;
-                    show_bottom_floating_bar(
-                        ui,
-                        16.0,
-                        Id::unique("bloom_decrypt_div_bar"),
-                        |ui| {
-                            let items = [
-                                DividerButtonItem::new("Sync")
-                                    .icon(TwoUiIcon::Refresh)
-                                    .enabled(!is_busy),
-                                DividerButtonItem::new("Decrypt")
-                                    .icon(TwoUiIcon::SecurityOutline)
-                                    .enabled(!is_busy),
-                            ];
-                            dec_action =
-                                TwoUiDividerButtonLayout::new("dec_bar", &items).show(ui);
-                        },
-                    );
-                    if let Some(idx) = dec_action {
-                        if idx == 0 {
-                            self.sync_decrypt_from_selection(ui.ctx());
-                        } else {
-                            self.trigger_decrypt(ui.ctx());
-                        }
-                    }
-                }
                 if is_flash_page {
                     let can_start = !flash_flashing
                         && !flash_verifying_md5
@@ -1641,11 +1565,6 @@ impl eframe::App for BloomApp {
             .flatten()
         {
             match action {
-                SnackAction::OpenFolder(path) => {
-                    if let Err(err) = state::open_folder_in_os(&path) {
-                        self.toast.show_message(ui.ctx(), format!("{err}"), 2.4);
-                    }
-                }
                 SnackAction::RestoreConfig(prev) => {
                     self.config = *prev;
                     self.sync_theme(ui.ctx());

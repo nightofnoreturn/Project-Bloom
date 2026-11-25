@@ -99,50 +99,6 @@ pub fn labeled_text_field(
     .inner
 }
 
-/// Responsive two-column (wide) or stacked (narrow) Model + CSC input pair. Returns `true` if edited.
-pub fn model_csc_inputs(
-    ui: &mut Ui,
-    model: &mut String,
-    csc: &mut String,
-    csc_caption: Option<&str>,
-    enabled: bool,
-) -> bool {
-    let mut changed = false;
-    if ui.available_width() >= 520.0 {
-        ui.columns(2, |cols| {
-            if labeled_text_field(&mut cols[0], "Model", model, "SM-S921B", None, enabled)
-                .changed()
-            {
-                model.make_ascii_uppercase();
-                changed = true;
-            }
-            if labeled_text_field(
-                &mut cols[1],
-                "CSC",
-                csc,
-                "EUX",
-                csc_caption,
-                enabled,
-            )
-            .changed()
-            {
-                csc.make_ascii_uppercase();
-                changed = true;
-            }
-        });
-    } else {
-        if labeled_text_field(ui, "Model", model, "SM-S921B", None, enabled).changed() {
-            model.make_ascii_uppercase();
-            changed = true;
-        }
-        if labeled_text_field(ui, "CSC", csc, "EUX", csc_caption, enabled).changed() {
-            csc.make_ascii_uppercase();
-            changed = true;
-        }
-    }
-    changed
-}
-
 /// Samsung One UI 9 styled text field paired with a trailing browse action button.
 pub fn path_picker_field(
     ui: &mut Ui,

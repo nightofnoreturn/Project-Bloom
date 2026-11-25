@@ -209,14 +209,37 @@ impl BloomApp {
             .as_ref()
             .map(|r| r.code.clone())
             .unwrap_or_else(|| self.config.csc.clone());
+        let imei = {
+            let trimmed = self.config.imei.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        };
+        self.open_firmware_info_for(item, model_code, region_code, imei, ctx);
+    }
+
+    pub(crate) fn open_firmware_info_for(
+        &mut self,
+        item: HistoryItem,
+        model_code: String,
+        region_code: String,
+        imei_override: Option<String>,
+        ctx: &egui::Context,
+    ) {
+        let model_upper = model_code.trim().to_ascii_uppercase();
+        let region_upper = region_code.trim().to_ascii_uppercase();
+        let imei_clean = imei_override
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
 
         self.selected_grid_build = Some(item.clone());
+        self.firmware_info_model = model_upper.clone();
+        self.firmware_info_region = region_upper.clone();
+        self.firmware_info_imei = imei_clean.clone();
         self.firmware_info_open = true;
 
         let cache_key = format!(
             "{}|{}|{}",
-            model_code.trim().to_ascii_uppercase(),
-            region_code.trim().to_ascii_uppercase(),
+            model_upper,
+            region_upper,
             item.firmware.trim().to_ascii_uppercase()
         );
 
@@ -229,7 +252,6 @@ impl BloomApp {
         };
 
         if needs_fetch {
-            let imei = self.config.imei.trim();
             spawn_fetch_firmware_binary_info(
                 &self.rt,
                 std::sync::Arc::clone(&self.shared),
@@ -237,9 +259,9 @@ impl BloomApp {
                 ctx.clone(),
                 cache_key,
                 item.firmware,
-                model_code,
-                region_code,
-                (!imei.is_empty()).then(|| imei.to_owned()),
+                model_upper,
+                region_upper,
+                imei_clean,
                 self.config.allow_mismatch,
             );
         }
@@ -254,16 +276,22 @@ impl BloomApp {
             return;
         };
 
-        let model_code = self
-            .selected_my_device
-            .as_ref()
-            .map(|d| d.model.clone())
-            .unwrap_or_else(|| self.config.model.clone());
-        let region_code = self
-            .selected_my_region
-            .as_ref()
-            .map(|r| r.code.clone())
-            .unwrap_or_else(|| self.config.csc.clone());
+        let model_code = if !self.firmware_info_model.trim().is_empty() {
+            self.firmware_info_model.clone()
+        } else {
+            self.selected_my_device
+                .as_ref()
+                .map(|d| d.model.clone())
+                .unwrap_or_else(|| self.config.model.clone())
+        };
+        let region_code = if !self.firmware_info_region.trim().is_empty() {
+            self.firmware_info_region.clone()
+        } else {
+            self.selected_my_region
+                .as_ref()
+                .map(|r| r.code.clone())
+                .unwrap_or_else(|| self.config.csc.clone())
+        };
 
         let cache_key = format!(
             "{}|{}|{}",
@@ -395,7 +423,13 @@ impl BloomApp {
             });
 
         if download_clicked {
-            self.start_firmware_download(&item, &model_code, &region_code, ctx);
+            self.start_firmware_download(
+                &item,
+                &model_code,
+                &region_code,
+                self.firmware_info_imei.clone(),
+                ctx,
+            );
             self.firmware_info_open = false;
         } else if close_clicked
             || modal_resp.backdrop_response.clicked()

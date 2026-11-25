@@ -468,6 +468,12 @@ pub async fn resolve_binary_with_fallback(
             }
             if candidates.is_empty() {
                 candidates = imei_db.imeis_for_model(model);
+            } else {
+                for fallback in imei_db.imeis_for_model(model) {
+                    if !candidates.contains(&fallback) {
+                        candidates.push(fallback);
+                    }
+                }
             }
 
             let mut legacy = FusClient::new(FusMode::Legacy)?;

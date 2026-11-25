@@ -46,6 +46,7 @@ impl BloomApp {
         item: &HistoryItem,
         model: &str,
         region: &str,
+        imei_override: Option<String>,
         ctx: &egui::Context,
     ) {
         let model_upper = model.trim().to_ascii_uppercase();
@@ -173,7 +174,13 @@ impl BloomApp {
             guard.active_downloads.push(job);
         }
 
-        let custom_imei = (!self.config.imei.trim().is_empty()).then(|| self.config.imei.clone());
+        let custom_imei = imei_override
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                let cfg = self.config.imei.trim();
+                (!cfg.is_empty()).then(|| cfg.to_owned())
+            });
         spawn_firmware_download(
             &self.rt,
             std::sync::Arc::clone(&self.shared),
